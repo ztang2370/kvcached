@@ -12,7 +12,7 @@ SGL_PORT=30000
 op=$1
 
 if [ "$op" == "vllm" ]; then
-    source "$ENGINE_DIR/vllm-v0.8.4/.venv/bin/activate"
+    source "$ENGINE_DIR/vllm-v0.9.2/.venv/bin/activate"
     export PYTHONPATH="$KVCACHED_DIR:$PYTHONPATH"
     export VLLM_USE_V1=1
     export VLLM_ATTENTION_BACKEND=FLASH_ATTN

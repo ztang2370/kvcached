@@ -5,6 +5,8 @@ from typing import Dict, List, Optional
 
 import torch
 
+from kvcached.tp_ipc_util import (broadcast_map_to_kv_tensors_to_workers,
+                                  broadcast_unmap_from_kv_tensors_to_workers)
 from kvcached.utils import PAGE_SIZE, get_kvcached_logger
 from kvcached.vmm_ops import map_to_kv_tensors, unmap_from_kv_tensors
 
@@ -119,7 +121,7 @@ class PageAllocatorBase(ABC):
 
 class PageAllocator(PageAllocatorBase):
 
-    def __init__(self, total_mem_size: int, page_size: int):
+    def __init__(self, total_mem_size: int, page_size: int, tp_size: int = 1):
         logger.info(f"Init KVCached PageAllocator: "
                     f"total_mem_size={total_mem_size//(1024*1024)}MB, "
                     f"page_size={page_size//(1024*1024)}MB, "
@@ -152,6 +154,24 @@ class PageAllocator(PageAllocatorBase):
             # Start preallocation thread
             self._start_prealloc_thread()
 
+        self.tp_size = tp_size
+
+    def call_map_to_kv_tensors(self, offsets: list[int]) -> None:
+        """Call the mapping function to map pages to physical memory, considering tensor parallelism."""
+        if self.tp_size > 1:
+            # map the pages across all tensor parallel workers.
+            broadcast_map_to_kv_tensors_to_workers(self.tp_size, offsets)
+        else:
+            map_to_kv_tensors(offsets)
+
+    def call_unmap_from_kv_tensors(self, offsets: list[int]) -> None:
+        """Call the unmapping function to unmap pages from physical memory, considering tensor parallelism."""
+        if self.tp_size > 1:
+            # unmap the pages across all tensor parallel workers.
+            broadcast_unmap_from_kv_tensors_to_workers(self.tp_size, offsets)
+        else:
+            unmap_from_kv_tensors(offsets)
+
     def _prealloc_worker(self):
         """Worker thread that preallocates pages and maps them to physical memory."""
         while self.prealloc_running:
@@ -183,7 +203,7 @@ class PageAllocator(PageAllocatorBase):
             # Todo: Map pages to physical memory (outside lock)
             if pages_to_reserve:
                 try:
-                    map_to_kv_tensors(
+                    self.call_map_to_kv_tensors(
                         [pid * self.page_size for pid in pages_to_reserve])
                     with self.prealloc_lock:
                         self.reserved_page_list.extend(pages_to_reserve)
@@ -247,7 +267,7 @@ class PageAllocator(PageAllocatorBase):
         with self.prealloc_lock:
             page_id = self.free_page_list.popleft()
         page = Page(page_id, self.page_size)
-        map_to_kv_tensors([page_id * self.page_size])
+        self.call_map_to_kv_tensors([page_id * self.page_size])
 
         if PAGE_PREALLOC_ENABLED:
             # Trigger preallocation to refill the pool
@@ -271,7 +291,7 @@ class PageAllocator(PageAllocatorBase):
                 return
 
         # Slow path: free page and its physical memory mapping.
-        unmap_from_kv_tensors([page_id * self.page_size])
+        self.call_unmap_from_kv_tensors([page_id * self.page_size])
         with self.prealloc_lock:
             self.free_page_list.append(page_id)
 
@@ -286,7 +306,8 @@ class PageAllocator(PageAllocatorBase):
                 page_ids = page_ids[num_to_reserve:]
 
         # Slow path: free page_ids and their physical memory mapping.
-        unmap_from_kv_tensors([pid * self.page_size for pid in page_ids])
+        self.call_unmap_from_kv_tensors(
+            [pid * self.page_size for pid in page_ids])
         with self.prealloc_lock:
             self.free_page_list.extend(page_ids)
 
@@ -337,7 +358,8 @@ class PageAllocator(PageAllocatorBase):
         if not pages_to_unmap:
             return
 
-        unmap_from_kv_tensors([pid * self.page_size for pid in pages_to_unmap])
+        self.call_unmap_from_kv_tensors(
+            [pid * self.page_size for pid in pages_to_unmap])
 
         with self.prealloc_lock:
             self.free_page_list.extend(pages_to_unmap)
@@ -388,13 +410,20 @@ class KVCacheManager:
         block_size: int,
         cell_size: int,
         num_layers: int,
+        tp_size: int = 1,
     ):
         self.num_blocks = num_blocks
         self.block_mem_size = block_size * cell_size
         self.num_layers = num_layers
 
         mem_size = self.num_blocks * self.block_mem_size
-        self.page_allocator = PageAllocator(mem_size, PAGE_SIZE)
+        self.tp_size = tp_size
+
+        if self.tp_size > 1:
+            self.page_allocator = PageAllocator(mem_size, PAGE_SIZE,
+                                                self.tp_size)
+        else:
+            self.page_allocator = PageAllocator(mem_size, PAGE_SIZE)
 
         self.num_avail_blocks = 0  # Only count free blocks in avail_pages
         self.avail_pages: Dict[int, Page] = {}
