@@ -1,6 +1,12 @@
 import logging
+import os
 
 PAGE_SIZE = 2 * 1024 * 1024  # 2MB
+
+# Allow overriding the shared-memory segment name via env var so multiple
+# kvcached deployments on one machine can coexist without collision.
+DEFAULT_IPC_NAME = os.getenv("KVCACHED_IPC_NAME", "kvcached_mem_info")
+SHM_DIR = "/dev/shm"
 
 
 def align_to(x: int, a: int) -> int:

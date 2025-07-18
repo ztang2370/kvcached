@@ -1,3 +1,6 @@
+import atexit
+import os
+import signal
 import threading
 import time
 from abc import ABC, abstractmethod
@@ -5,12 +8,16 @@ from collections import defaultdict, deque
 from functools import wraps
 from typing import Dict, List, Optional
 
+import posix_ipc
 import torch
 
+from kvcached.controller.utils import (MemInfoStruct, RwLockedShm,
+                                       get_ipc_name, get_ipc_path,
+                                       init_kv_cache_limit)
 from kvcached.tp_ipc_util import (broadcast_kv_tensors_created_to_workers,
                                   broadcast_map_to_kv_tensors_to_workers,
                                   broadcast_unmap_from_kv_tensors_to_workers)
-from kvcached.utils import PAGE_SIZE, get_kvcached_logger
+from kvcached.utils import DEFAULT_IPC_NAME, PAGE_SIZE, get_kvcached_logger
 from kvcached.vmm_ops import (kv_tensors_created, map_to_kv_tensors,
                               unmap_from_kv_tensors)
 
@@ -324,9 +331,9 @@ class PageAllocator(PageAllocatorBase):
             # Reuse previously reclaimed pages first.
             num_to_reuse = min(len(self.reclaimed_page_list), num_to_expand)
             with self.prealloc_lock:
-                self.free_page_list.extend(
-                    self.reclaimed_page_list[:num_to_reuse])
-            self.reclaimed_page_list = self.reclaimed_page_list[num_to_reuse:]
+                for _ in range(num_to_reuse):
+                    self.free_page_list.append(
+                        self.reclaimed_page_list.popleft())
             num_to_expand -= num_to_reuse
             self.num_free_pages += num_to_reuse
 
@@ -352,7 +359,7 @@ class PageAllocator(PageAllocatorBase):
 
     def trim(self) -> None:
         with self.prealloc_lock:
-            pages_to_unmap = self.reserved_page_list[:]  # copy
+            pages_to_unmap = list(self.reserved_page_list)
             self.reserved_page_list.clear()
 
         if not pages_to_unmap:
@@ -507,10 +514,11 @@ class KVCacheManager:
         self.num_layers = num_layers
         self.reserve_null_block = reserve_null_block
 
+        # NOTE: this is the memory size of the K or V tensor in one layer
+        self.mem_size = self.num_blocks * self.block_mem_size
         self.tp_size = tp_size
-        mem_size = self.num_blocks * self.block_mem_size
-        self.page_allocator = PageAllocator(mem_size, PAGE_SIZE, tp_size,
-                                            async_sched)
+        self.page_allocator = PageAllocator(self.mem_size, PAGE_SIZE,
+                                            self.tp_size, async_sched)
 
         self.num_avail_blocks = 0  # Only count free blocks in avail_pages
         self.avail_pages: Dict[int, Page] = {}
@@ -531,6 +539,10 @@ class KVCacheManager:
         # exist, then complete the remaining setup (reserve null block, start
         # pre-alloc thread) and finally set the event.
         threading.Thread(target=self._post_init, daemon=True).start()
+
+        self.ipc_name = get_ipc_name(DEFAULT_IPC_NAME)
+        init_kv_cache_limit(self.ipc_name, self.mem_size * num_layers * 2)
+        self._register_cleanup()
 
     def _post_init(self):
         if self.null_block is not None:
@@ -567,6 +579,13 @@ class KVCacheManager:
             # Normal callers must wait until background initialisation is
             # finished and then perform the usual capacity check.
             self._wait_post_init()
+
+        with RwLockedShm(self.ipc_name, MemInfoStruct.SHM_SIZE,
+                         RwLockedShm.RLOCK) as mm:
+            mem_info = MemInfoStruct.from_buffer(mm)
+            new_mem_size = mem_info.total_size // self.num_layers // 2
+            if new_mem_size != self.mem_size:
+                self.resize(new_mem_size)
 
         if self.available_size() < need_size:
             logger.warning(f"available_size()={self.available_size()} < "
@@ -616,6 +635,14 @@ class KVCacheManager:
                 page.free_list = []
                 self.full_pages[page.page_id] = page
         assert remaining_need == 0, "Insufficient memory for allocation."
+
+        with RwLockedShm(self.ipc_name, MemInfoStruct.SHM_SIZE,
+                         RwLockedShm.WLOCK) as mm:
+            mem_info = MemInfoStruct.from_buffer(mm)
+            mem_info.used_size = self._get_used_size()
+            mem_info.prealloc_size = self._get_prealloc_size()
+            mem_info.write_to_buffer(mm)
+
         return ret_index
 
     @synchronized
@@ -669,6 +696,13 @@ class KVCacheManager:
             self.in_shrink = False
             self.target_num_blocks = None
 
+        with RwLockedShm(self.ipc_name, MemInfoStruct.SHM_SIZE,
+                         RwLockedShm.WLOCK) as mm:
+            mem_info = MemInfoStruct.from_buffer(mm)
+            mem_info.used_size = self._get_used_size()
+            mem_info.prealloc_size = self._get_prealloc_size()
+            mem_info.write_to_buffer(mm)
+
     @synchronized
     def try_to_reserve(self, need_size: int) -> bool:
         self._wait_post_init()
@@ -689,9 +723,13 @@ class KVCacheManager:
             self.reserved_blocks = []
 
     @synchronized
-    def resize(self, new_num_blocks: int):
+    def resize(self, new_mem_size: int):
+        """
+        Reset the limit of the K or V tensor in one layer.
+        new_mem_size: the memory size of the K or V tensor in one layer
+        """
         self._wait_post_init()
-        new_mem_size = new_num_blocks * self.block_mem_size
+        assert new_mem_size > 0, "new_mem_size must be positive"
         if self.page_allocator.resize(new_mem_size):
             if self.in_shrink:
                 self.in_shrink = False
@@ -703,7 +741,7 @@ class KVCacheManager:
         # NOTE: we can support resizing with reserved blocks, but we want to enforce
         # this check for now to ensure correctness.
         self.in_shrink = True
-        self.target_num_blocks = new_num_blocks
+        self.target_num_blocks = new_mem_size // self.block_mem_size
         self.free_reserved()
         return False
 
@@ -726,11 +764,20 @@ class KVCacheManager:
         return avail_size + free_size
 
     @synchronized
+    def _get_used_size(self) -> int:
+        # Memory actively used by allocations (excludes preallocated pages)
+        return (self.page_allocator.get_num_inuse_pages() * self.num_layers *
+                PAGE_SIZE * 2)
+
+    def _get_prealloc_size(self) -> int:
+        # Memory held by preallocated pages that are not yet actively used
+        return (self.page_allocator.get_num_reserved_pages() *
+                self.num_layers * PAGE_SIZE * 2)
+
+    @synchronized
     def get_mapped_memory_size(self, unit='bytes') -> float:
         """Get memory usage in specified unit (bytes, kb, mb, gb)."""
-        memory_bytes = (self.page_allocator.get_num_inuse_pages() +
-                        self.page_allocator.get_num_reserved_pages()
-                        ) * self.num_layers * PAGE_SIZE * 2  # K and V tensors
+        memory_bytes = self._get_used_size()
 
         if unit == 'bytes':
             return memory_bytes
@@ -756,3 +803,43 @@ class KVCacheManager:
 
     def clear(self):
         raise NotImplementedError
+
+    def _cleanup_shm(self, *args):
+        """Remove the POSIX shared-memory segment and its backing file."""
+        try:
+            # Unlink the POSIX shared memory object (no-op if already removed)
+            posix_ipc.unlink_shared_memory(self.ipc_name)
+        except Exception:
+            pass
+
+        # Also attempt to remove the backing file in /dev/shm (created by RwLockedShm)
+        try:
+            os.unlink(get_ipc_path(self.ipc_name))
+        except FileNotFoundError:
+            pass
+
+        # If invoked as a signal handler, re-raise the default behaviour so the
+        # process exits with the expected status code.
+        if args and isinstance(args[0], int):
+            signum = args[0]
+            signal.signal(signum, signal.SIG_DFL)
+            os.kill(os.getpid(), signum)
+
+    def _register_cleanup(self):
+        """Register atexit and signal handlers for shared-memory cleanup."""
+        # Run on normal interpreter shutdown
+        atexit.register(self._cleanup_shm)
+
+        # Handle common termination signals (e.g., Ctrl-C or docker stop)
+        for _sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP,
+                     signal.SIGQUIT):
+            try:
+                signal.signal(_sig, self._cleanup_shm)
+            except Exception:
+                pass
+
+    def __del__(self):
+        try:
+            self._cleanup_shm()
+        except Exception:
+            pass
