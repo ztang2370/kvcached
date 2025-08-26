@@ -58,7 +58,7 @@ def recv_msg(sock: socket.socket) -> Message:
     return cast(Message, pickle.loads(data))
 
 
-def start_worker_listerner_thread(rank: int):
+def start_worker_listener_thread(rank: int):
     """
     Start a thread that listens for messages on the worker socket.
     The callback is called with the received message.
