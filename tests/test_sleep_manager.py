@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright contributors to the kvcached project
+# SPDX-License-Identifier: Apache-2.0
+
 """
 Test script for the updated SleepManager implementation with vLLM API integration.
 This test connects to real vLLM instances running on localhost.

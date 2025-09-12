@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright contributors to the kvcached project
+# SPDX-License-Identifier: Apache-2.0
+
 import socket
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict

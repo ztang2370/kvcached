@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright contributors to the kvcached project
+# SPDX-License-Identifier: Apache-2.0
+
 import inspect
 import os
 import types
@@ -170,7 +173,7 @@ def _inject_elastic_mem_pool(mem_pool_mod: types.ModuleType) -> bool:
             logger.info(f"Physical KV Cache limits by --mem-fraction-static: "
                         f"#tokens: {size}, K size: "
                         f"{k_size_phy / GB:.2f} GB, V size: {v_size_phy / GB:.2f} GB")
-            
+
             self.mem_usage = (k_size + v_size) / GB
 
         def __del__(self):  # best-effort cleanup
@@ -200,7 +203,7 @@ def _inject_elastic_mem_pool(mem_pool_mod: types.ModuleType) -> bool:
                 attention_type="MHA",
                 kv_layout="NHD",
             )
-        
+
         def get_kv_size_bytes_phy(self):
             """Return the physical memory limits of the K/V buffers.
 

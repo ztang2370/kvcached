@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright contributors to the kvcached project
+// SPDX-License-Identifier: Apache-2.0
+
 #include <pybind11/pybind11.h>
 #include <string>
 #include <torch/extension.h>

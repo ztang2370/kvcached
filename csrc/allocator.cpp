@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright contributors to the kvcached project
+// SPDX-License-Identifier: Apache-2.0
+
 #include <memory>
 #include <mutex>
 #include <torch/extension.h>
