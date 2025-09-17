@@ -1,3 +1,29 @@
+<<<<<<< HEAD
+=======
+"""Ollama integration interfaces for kvcached.
+
+Three-Stage Allocation Architecture:
+
+Stage 1 - System Initialization (ollama run startup):
+  - init_kvcached(): Initialize the kvcached system
+  - Called right after 'ollama run model', before load() in server.go
+  
+Stage 2 - Model Allocation (allocModel):
+  - alloc_kv_cache(): Allocate virtual memory space, create tensors, and auto-create KVCacheManager
+  - get_kv_cache_manager(): Optional - override manager with custom parameters
+  - Called during model loading for this specific model
+  
+Stage 3 - Request Processing:
+  - alloc_kv_bridge(): Allocate specific blocks for a request/conversation
+  - free_kv_bridge(): Free blocks when cache slot is evicted (NOT on sequence completion)
+  
+Cache Slot Lifetime Management:
+  - Blocks allocated via alloc_kv_bridge() persist across sequence completions
+  - Blocks are only freed via free_kv_bridge() during cache slot eviction
+  - This preserves conversation continuity for Ollama's prefix caching
+"""
+
+>>>>>>> e6df795 (test ollama integration)
 import math
 from typing import List, Optional, Tuple
 
@@ -19,6 +45,7 @@ _async_sched: bool = False
 _tp_size: int = 1
 _contiguous_layout: bool = CONTIGUOUS_LAYOUT
 _global_manager: Optional[KVCacheManager] = None
+<<<<<<< HEAD
 _kv_cache_allocated: bool = False
 
 
@@ -111,6 +138,8 @@ def _allocate_kv_cache_for_ollama() -> None:
         logger.error(f"Failed to allocate KV cache: {e}")
         logger.warning("Falling back to dummy mode")
         raise  # Re-raise to let caller know allocation failed
+=======
+>>>>>>> e6df795 (test ollama integration)
 
 
 def init_kvcached(
@@ -120,7 +149,17 @@ def init_kvcached(
     device: Optional[str] = None,
     async_sched: bool = False,
 ) -> None:
+<<<<<<< HEAD
     """Initialize kvcached for Ollama integration.
+=======
+    """Stage 1: Initialize kvcached system during Ollama startup.
+    
+    This should be called right after 'ollama run model' command is executed,
+    before any model loading occurs. This sets up the kvcached infrastructure
+    and prepares the system for virtual memory management.
+    
+    Call location: server.go, during server initialization before load()
+>>>>>>> e6df795 (test ollama integration)
     
     Args:
         tp_rank: Tensor parallel rank (0 for single GPU).
@@ -173,7 +212,18 @@ def alloc_kv_cache(
         attention_type: str = "MHA",  # TODO: support MLA
         kv_layout: str = "NHD",  # NHD: (num_tokens, head_num, head_dim)
 ) -> List[torch.Tensor]:
+<<<<<<< HEAD
     """Allocate KV cache tensors for Ollama models.
+=======
+    """Stage 2: Allocate KV cache tensors during model loading (allocModel).
+    
+    This function should be called during Ollama's allocModel() phase to set up
+    the virtual memory space and create the underlying tensor storage for this
+    specific model. This is a one-time setup per model, after Stage 1 init.
+    
+    Call location: allocModel() function during model loading
+    Prerequisites: init_kvcached() must have been called first
+>>>>>>> e6df795 (test ollama integration)
 
     Args:
         kvcache_shape: Shape of the KV cache (2, num_blocks, head_num, head_dim).
@@ -241,11 +291,33 @@ def alloc_kv_cache(
             for i in range(num_layers)
         ]
 
+<<<<<<< HEAD
     logger.info(f"KV cache allocation complete: {len(kv_tensors)} layers")
+=======
+    # Auto-create the global KVCacheManager for Stage 3 operations
+    # This is simpler than requiring a separate call to get_kv_cache_manager()
+    global _global_manager
+    head_num = kvcache_shape_list[2]
+    head_dim = kvcache_shape_list[3] 
+    cell_size = head_num * head_dim * 2 * dtype.itemsize  # K+V * bytes per element
+    
+    _global_manager = KVCacheManager(
+        num_blocks=num_blocks,
+        block_size=block_size,
+        cell_size=cell_size,
+        num_layers=num_layers,
+        tp_size=_tp_size,
+        async_sched=_async_sched,
+    )
+    
+    logger.info(f"KV cache allocation complete: {len(kv_tensors)} layers, {num_blocks} blocks")
+    logger.info(f"Auto-created KVCacheManager: block_size={block_size}, cell_size={cell_size}")
+>>>>>>> e6df795 (test ollama integration)
     return kv_tensors
 
 
 def alloc_kv_bridge(num_blocks: int) -> List[int]:
+<<<<<<< HEAD
     """Bridge function to allocate KV cache blocks for a request.
 
     Args:
@@ -257,10 +329,31 @@ def alloc_kv_bridge(num_blocks: int) -> List[int]:
     global _kv_cache_allocated
     logger.info(f"alloc_kv_bridge called with num_blocks={num_blocks}")
 
+=======
+    """Stage 3: Allocate specific KV cache blocks for a request.
+    
+    This function should be called during request processing when Ollama needs
+    to allocate specific blocks for a conversation/sequence. This uses the
+    KVCacheManager to manage block allocation from the pre-allocated tensor pool.
+    
+    This is called multiple times during operation - once per request that needs
+    new cache blocks.
+    
+    Call location: LoadCacheSlot() in cache.go during request processing
+    Prerequisites: init_kvcached() and alloc_kv_cache() must have been called
+
+    Args:
+        num_blocks: Number of blocks to allocate for this specific request.
+
+    Returns:
+        List of allocated block IDs that can be used for this request.
+    """
+>>>>>>> e6df795 (test ollama integration)
     if not _kvcached_initialized:
         raise RuntimeError(
             "kvcached is not initialized. Please call init_kvcached() first.")
 
+<<<<<<< HEAD
     # Auto-allocate KV cache if not done yet
     if not _kv_cache_allocated:
         logger.info("KV cache not allocated yet, performing lazy allocation")
@@ -323,6 +416,34 @@ def free_kv_bridge(block_ids: List[int]) -> int:
 
     Args:
         block_ids: List of block IDs to free.
+=======
+    if _global_manager is None:
+        raise RuntimeError(
+            "KV cache not allocated. Please call alloc_kv_cache() first.")
+
+    try:
+        allocated_blocks = _global_manager.alloc(num_blocks)
+        logger.info(f"Allocated {num_blocks} blocks: {allocated_blocks}")
+        return allocated_blocks
+    except Exception as e:
+        logger.error(f"Failed to allocate {num_blocks} blocks: {e}")
+        raise
+
+
+def free_kv_bridge(block_ids: List[int]) -> int:
+    """Stage 3: Free specific KV cache blocks when no longer needed.
+    
+    This function should be called when Ollama needs to free blocks that were
+    allocated via alloc_kv_bridge(). In the Cache Slot Lifetime Management
+    approach, this should be called during cache slot eviction, NOT during
+    sequence completion.
+    
+    Call location: freeSlotKvcachedBlocks() in cache.go during slot eviction
+    Prerequisites: Blocks must have been allocated via alloc_kv_bridge()
+
+    Args:
+        block_ids: List of block IDs to free (from previous alloc_kv_bridge call).
+>>>>>>> e6df795 (test ollama integration)
 
     Returns:
         0 on success, -1 on error.
@@ -335,6 +456,7 @@ def free_kv_bridge(block_ids: List[int]) -> int:
         logger.warning("Global manager is None, cannot free blocks")
         return -1
 
+<<<<<<< HEAD
     # Try real free with timeout using threading
     logger.info(
         f"Attempting real free of {len(block_ids)} blocks with timeout")
@@ -374,12 +496,29 @@ def free_kv_bridge(block_ids: List[int]) -> int:
             return -1
     else:
         logger.warning("Free operation timed out (hung)")
+=======
+    try:
+        _global_manager.free(block_ids)
+        logger.info(f"Freed {len(block_ids)} blocks: {block_ids}")
+        return 0
+    except Exception as e:
+        logger.error(f"Failed to free {len(block_ids)} blocks: {e}")
+>>>>>>> e6df795 (test ollama integration)
         return -1
 
 
 def get_kv_cache_manager(num_blocks: int, block_size: int, cell_size: int,
                          num_layers: int) -> KVCacheManager:
+<<<<<<< HEAD
     """Get a KVCacheManager instance for Ollama.
+=======
+    """Optional: Create/override KVCacheManager with custom parameters.
+    
+    This is now optional since alloc_kv_cache() auto-creates the manager.
+    Use this function if you need to override the manager with custom parameters.
+    
+    Prerequisites: init_kvcached() must have been called
+>>>>>>> e6df795 (test ollama integration)
 
     Args:
         num_blocks: Number of blocks in the cache.
@@ -403,6 +542,11 @@ def get_kv_cache_manager(num_blocks: int, block_size: int, cell_size: int,
         _tp_size,
         async_sched=_async_sched,
     )
+<<<<<<< HEAD
+=======
+    
+    logger.info(f"KVCacheManager created/overridden: {num_blocks} blocks, block_size={block_size}, cell_size={cell_size}")
+>>>>>>> e6df795 (test ollama integration)
     return _global_manager
 
 
@@ -421,3 +565,8 @@ def update_kvcache(tokens: List[int]) -> int:
     # kvcached handles virtual memory management automatically
     # No manual token-level updates are needed
     return 0
+<<<<<<< HEAD
+=======
+
+
+>>>>>>> e6df795 (test ollama integration)
