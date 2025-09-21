@@ -212,7 +212,7 @@ def alloc_kv_bridge(num_blocks: int) -> List[int]:
             if allocated_blocks is None:
                 allocation_error = "insufficient memory"
             else:
-                logger.debug(f"Real allocation succeeded: {allocated_blocks}")
+                logger.info(f"Real allocation succeeded: {allocated_blocks}")
         except Exception as e:
             allocation_error = str(e)
             logger.error(f"Real allocation failed: {e}")
@@ -273,7 +273,7 @@ def free_kv_bridge(block_ids: List[int]) -> int:
         nonlocal free_success, free_error
         try:
             _global_manager.free(block_ids)
-            logger.debug(f"Successfully freed {len(block_ids)} real blocks")
+            logger.info(f"Successfully freed {len(block_ids)} real blocks")
             free_success = True
         except Exception as e:
             logger.error(f"Failed to free real blocks: {e}")
