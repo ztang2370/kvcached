@@ -162,7 +162,7 @@ setup_ollama() {
     # Build kvcached C bridge library (created by the patch)
     echo "Building kvcached C bridge library..."
 
-    gcc -shared -fPIC -o kvcached_bridge/libkvcached_bridge.so kvcached_bridge/kvcached_bridge.c \ 
+    gcc -shared -fPIC -o kvcached_bridge/libkvcached_bridge.so kvcached_bridge/kvcached_bridge.c \
         $(python3-config --cflags --ldflags) -lpython3.11 -lpthread
 
     echo "Built kvcached bridge library successfully"

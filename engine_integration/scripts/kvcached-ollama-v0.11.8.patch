@@ -597,7 +597,7 @@ index 02827cd0..9a76bc01 100644
 +++ b/runner/ollamarunner/cache.go
 @@ -1,11 +1,20 @@
  package ollamarunner
- 
+
 +/*
 +#cgo CFLAGS: -I../../kvcached_bridge
 +#cgo LDFLAGS: -L../../kvcached_bridge -lkvcached_bridge
@@ -613,37 +613,37 @@ index 02827cd0..9a76bc01 100644
  	"math"
  	"time"
 +	"unsafe"
- 
+
  	"github.com/ollama/ollama/kvcache"
  	"github.com/ollama/ollama/ml"
 @@ -28,33 +37,62 @@ type InputCache struct {
  	// optimize cache eviction for multiple users
  	multiUserCache bool
- 
+
 +	// kvcached enabled flag
 +	kvcachedEnabled bool
 +
  	cache kvcache.Cache
  }
- 
+
 -func NewInputCache(model model.Model, kvCacheType string, kvSize int32, numSlots int, batchSize int, multiUserCache bool) (*InputCache, error) {
 +func NewInputCache(model model.Model, kvCacheType string, kvSize int32, numSlots int, batchSize int, multiUserCache bool, kvcachedEnabled bool) (*InputCache, error) {
 +	slog.Debug("NewInputCache called", "kvCacheType", kvCacheType, "kvSize", kvSize, "numSlots", numSlots, "batchSize", batchSize, "kvcachedEnabled", kvcachedEnabled)
 +
  	numCtx := kvSize / int32(numSlots)
 +	slog.Debug("Calculated numCtx", "numCtx", numCtx)
- 
+
  	if numCtx < 1 {
  		return nil, fmt.Errorf("must have at least one kv cache entry per parallel sequence (kv: %v parallel: %v)", kvSize, numSlots)
  	}
- 
+
  	slots := make([]InputCacheSlot, numSlots)
 +	slog.Debug("Created cache slots", "numSlots", numSlots)
- 
+
  	for i := range slots {
  		slots[i] = InputCacheSlot{Id: i}
  	}
- 
+
 -	cache := model.Config().Cache
 -	if cache != nil {
 -		cache.Init(model.Backend(), kvCacheTypeFromStr(kvCacheType), numSlots, int(numCtx), batchSize)
@@ -673,7 +673,7 @@ index 02827cd0..9a76bc01 100644
 +            slog.Debug("Model has no native cache - disabling cache")
 +        }
 +    }
- 
+
  	return &InputCache{
 -		numCtx:         numCtx,
 -		enabled:        cache != nil,
@@ -688,20 +688,20 @@ index 02827cd0..9a76bc01 100644
 +		cache:           cache,
  	}, nil
  }
- 
+
 @@ -74,7 +112,9 @@ func (c *InputCache) Close() {
  		return
  	}
- 
+
 -	c.cache.Close()
 +	if c.cache != nil {
 +		c.cache.Close()
 +	}
  }
- 
+
  // Locking: Operations on InputCacheSlot (including finding one
 @@ -93,9 +133,16 @@ type InputCacheSlot struct {
- 
+
  	// last time this cache was used (as of start of processing)
  	lastUsed time.Time
 +
@@ -710,7 +710,7 @@ index 02827cd0..9a76bc01 100644
 +	// and are only freed when the cache slot is actually evicted
 +	kvCacheBlocks []int32
  }
- 
+
  func (c *InputCache) LoadCacheSlot(prompt []input.Input) (*InputCacheSlot, []input.Input, error) {
 +	slog.Debug("LoadCacheSlot called", "promptLen", len(prompt), "enabled", c.enabled, "cache", c.cache != nil, "kvcachedEnabled", c.kvcachedEnabled)
 +
@@ -720,7 +720,7 @@ index 02827cd0..9a76bc01 100644
 @@ -121,19 +168,55 @@ func (c *InputCache) LoadCacheSlot(prompt []input.Input) (*InputCacheSlot, []inp
  		numPast--
  	}
- 
+
 -	if c.cache != nil {
 -		if numPast > 0 && !c.cache.CanResume(slot.Id, numPast) {
 -			numPast = 0
@@ -734,7 +734,7 @@ index 02827cd0..9a76bc01 100644
 +			slog.Debug("Conversation mismatch - freeing old kvcached blocks for slot", "slot", slot.Id)
 +			c.freeSlotKvcachedBlocks(slot)
  		}
- 
+
 -		err = c.cache.Remove(slot.Id, numPast, math.MaxInt32)
 -		if err != nil {
 -			// Some models don't support partial erasure
@@ -781,16 +781,16 @@ index 02827cd0..9a76bc01 100644
 -			numPast = 0
  		}
  	}
- 
+
 @@ -200,6 +283,9 @@ func (c *InputCache) findBestCacheSlot(prompt []input.Input) (*InputCacheSlot, i
  	if len(oldestSlot.Inputs) != 0 {
  		slog.Debug("evicting cache slot", "id", oldestSlot.Id, "inputs", len(oldestSlot.Inputs),
  			"used", oldestSlot.lastUsed)
-+		
++
 +		// Free kvcached blocks when slot is actually evicted
 +		c.freeSlotKvcachedBlocks(oldestSlot)
  	}
- 
+
  	if longest > 0 && longestSlot != oldestSlot {
 @@ -207,7 +293,7 @@ func (c *InputCache) findBestCacheSlot(prompt []input.Input) (*InputCacheSlot, i
  			len(longestSlot.Inputs))
@@ -804,7 +804,7 @@ index 02827cd0..9a76bc01 100644
 @@ -276,7 +362,109 @@ func (c *InputCache) ShiftCacheSlot(slot *InputCacheSlot, numKeep int32) error {
  	slog.Debug("context limit hit - shifting", "id", slot.Id, "limit", c.numCtx, "input", len(slot.Inputs),
  		"keep", numKeep, "discard", discard)
- 
+
 -	if c.cache != nil {
 +	if c.kvcachedEnabled {
 +		// For kvcached mode: preserve prefix caching by adjusting block allocation dynamically
@@ -913,7 +913,7 @@ index 02827cd0..9a76bc01 100644
  		if err != nil {
  			slog.Debug("kv cache removal unsupported, clearing cache and returning inputs for reprocessing",
 @@ -303,3 +491,76 @@ func (c *InputCache) ShiftCacheSlot(slot *InputCacheSlot, numKeep int32) error {
- 
+
  	return nil
  }
 +
@@ -995,7 +995,7 @@ index 2f41f68f..dcb54631 100644
 +++ b/runner/ollamarunner/runner.go
 @@ -1,5 +1,13 @@
  package ollamarunner
- 
+
 +/*
 +#cgo CFLAGS: -I../../kvcached_bridge
 +#cgo LDFLAGS: -L../../kvcached_bridge -lkvcached_bridge
@@ -1012,10 +1012,10 @@ index 2f41f68f..dcb54631 100644
  	"time"
  	"unicode/utf8"
 +	"unsafe"
- 
+
  	"golang.org/x/image/bmp"
  	"golang.org/x/sync/semaphore"
- 
+
  	"github.com/ollama/ollama/api"
 +	"github.com/ollama/ollama/discover"
  	"github.com/ollama/ollama/envconfig"
@@ -1024,7 +1024,7 @@ index 2f41f68f..dcb54631 100644
 @@ -310,6 +320,10 @@ type Server struct {
  	// next sequence for prompt processing to avoid starvation
  	nextSeq int
- 
+
 +	// kvcached integration
 +	kvCacheInitialized bool
 +	kvCachePtr uintptr // Reference to allocated virtual memory
@@ -1044,7 +1044,7 @@ index 2f41f68f..dcb54631 100644
 +	// Mark cache slot as available for reuse but preserve kvcached blocks
  	seq.cache.InUse = false
 +	seq.cache.lastUsed = time.Now()
-+	
++
 +	slog.Debug("Sequence completed, preserving kvcached blocks for conversation continuity",
 +		"slot", seq.cache.Id, "blocks", len(seq.cache.kvCacheBlocks))
 +
@@ -1052,7 +1052,7 @@ index 2f41f68f..dcb54631 100644
  	s.seqsSem.Release(1)
  }
 @@ -490,6 +515,18 @@ func (s *Server) processBatch() error {
- 
+
  	modelOutput, err := model.Forward(ctx, s.model, batchInputs, batch)
  	if err != nil {
 +		// Check if this is a CUDA memory access error, which indicates kvcached memory issue
@@ -1069,11 +1069,11 @@ index 2f41f68f..dcb54631 100644
 +		}
  		return fmt.Errorf("failed to decode batch: %w", err)
  	}
- 
+
 @@ -673,6 +710,9 @@ func (s *Server) completion(w http.ResponseWriter, r *http.Request) {
  				return
  			}
- 
+
 +			// Note: kvcached block allocation is now handled in LoadCacheSlot
 +			// for proper Cache Slot Lifetime Management
 +
@@ -1083,7 +1083,7 @@ index 2f41f68f..dcb54631 100644
 @@ -702,6 +742,8 @@ func (s *Server) completion(w http.ResponseWriter, r *http.Request) {
  					return
  				}
- 
+
 +				// kvcached manages virtual memory automatically - no manual updates needed
 +
  				flusher.Flush()
@@ -1091,7 +1091,7 @@ index 2f41f68f..dcb54631 100644
  				if err := json.NewEncoder(w).Encode(&llm.CompletionResponse{
 @@ -732,10 +774,25 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
  }
- 
+
  func (s *Server) reserveWorstCaseGraph() error {
 -	ctx := s.model.Backend().NewContext()
 +	slog.Debug("Starting reserveWorstCaseGraph")
@@ -1110,16 +1110,16 @@ index 2f41f68f..dcb54631 100644
 +		return fmt.Errorf("failed to create context")
 +	}
  	defer ctx.Close()
- 
+
  	var err error
 +	slog.Debug("Created context for reserveWorstCaseGraph")
  	inputs := make([]input.Input, s.batchSize)
  	mmStore := newMultimodalStore()
- 
+
 @@ -810,11 +867,28 @@ func (s *Server) reserveWorstCaseGraph() error {
- 
+
  	batch.Inputs = ctx.Input().FromIntSlice(batchInputs, len(batchInputs))
- 
+
 -	cache := s.model.Config().Cache
 -	if cache != nil {
 -		err := cache.StartForward(ctx, batch, true)
@@ -1149,18 +1149,18 @@ index 2f41f68f..dcb54631 100644
 +			_ = mc.StartForward(ctx, batch, false)
  		}
  	}
- 
+
 @@ -825,6 +899,10 @@ func (s *Server) reserveWorstCaseGraph() error {
- 
+
  	ctx.Forward(t).Reserve()
- 
+
 +	if s.kvCacheInitialized {
 +		slog.Debug("kvcached enabled - native WrapperCache in use (memory managed by kvcached)")
 +	}
 +
  	return nil
  }
- 
+
 @@ -845,7 +923,8 @@ func (s *Server) allocModel(
  			if err, ok := r.(error); ok {
  				panicErr = err
@@ -1174,7 +1174,7 @@ index 2f41f68f..dcb54631 100644
 @@ -861,7 +940,73 @@ func (s *Server) allocModel(
  		return errors.New("loras are not yet implemented")
  	}
- 
+
 -	s.cache, err = NewInputCache(s.model, kvCacheType, int32(kvSize), parallel, s.batchSize, multiUserCache)
 +	if params.AllocMemory {
 +		// Initialize kvcached with dynamic device detection
@@ -1196,7 +1196,7 @@ index 2f41f68f..dcb54631 100644
 +		} else {
 +			s.kvCacheInitialized = true
 +			slog.Info("Stage 1: kvcached initialized successfully", "device", deviceStr)
-+			
++
 +			// Initialize the model's native cache so attention tensors are valid in kvcached mode
 +			if mc := s.model.Config().Cache; mc != nil {
 +				var numCtx int
@@ -1208,7 +1208,7 @@ index 2f41f68f..dcb54631 100644
 +				slog.Debug("Initializing model native cache (kvcached mode)")
 +				mc.Init(s.model.Backend(), kvCacheTypeFromStr(kvCacheType), parallel, numCtx, s.batchSize)
 +			}
-+			
++
 +			// Stage 2: Allocate KV cache for this model
 +			// Get model-specific parameters for KV cache allocation
 +			config := s.model.Backend().Config()
@@ -1222,21 +1222,21 @@ index 2f41f68f..dcb54631 100644
 +				"model_arch", config.Architecture(),
 +				"head_num", headNum, "head_dim", headDim, "layers", numLayers,
 +				"num_blocks", numBlocks, "block_size", blockSize)
-+			
++
 +			cacheResult := C.kvcached_bridge_alloc_kv_cache(
 +				C.int(numBlocks),
-+				C.int(blockSize), 
++				C.int(blockSize),
 +				C.int(headNum),
 +				C.int(headDim),
 +				C.int(numLayers),
 +				device)
-+				
++
 +			if cacheResult != 0 {
 +				slog.Warn("Stage 2: Failed to allocate KV cache, continuing without it", "error", cacheResult)
 +				s.kvCacheInitialized = false
 +			} else {
-+				slog.Info("Stage 2: KV cache allocated successfully", 
-+					"blocks", numBlocks, "block_size", blockSize, 
++				slog.Info("Stage 2: KV cache allocated successfully",
++					"blocks", numBlocks, "block_size", blockSize,
 +					"head_num", headNum, "head_dim", headDim, "layers", numLayers)
 +			}
 +		}
@@ -1249,29 +1249,29 @@ index 2f41f68f..dcb54631 100644
 @@ -875,7 +1020,13 @@ func (s *Server) allocModel(
  	s.seqs = make([]*Sequence, s.parallel)
  	s.seqsSem = semaphore.NewWeighted(int64(s.parallel))
- 
+
 -	return s.reserveWorstCaseGraph()
 +    if s.kvCacheInitialized {
 +        // With kvcached enabled, skip ggml warmup graph to avoid cache/tensor setup pitfalls
 +        slog.Debug("Skipping reserveWorstCaseGraph (kvcached enabled)")
 +        return nil
 +    }
-+	
++
 +    return s.reserveWorstCaseGraph()
  }
- 
+
  // closeModel frees all memory associated with a model
 @@ -1012,6 +1163,7 @@ func Execute(args []string) error {
  		modelPath: *mpath,
  		status:    llm.ServerStatusLaunched,
  	}
 +	defer server.shutdownKVCache()
- 
+
  	server.cond = sync.NewCond(&server.mu)
  	server.ready.Add(1)
 @@ -1041,10 +1193,26 @@ func Execute(args []string) error {
  	}
- 
+
  	log.Println("Server listening on", addr)
 -	if err := httpServer.Serve(listener); err != nil {
 -		log.Fatal("server error:", err)
@@ -1291,7 +1291,7 @@ index 2f41f68f..dcb54631 100644
 +	if !s.kvCacheInitialized {
 +		return
  	}
- 
+
 -	return nil
 +	result := C.kvcached_bridge_shutdown_kvcached()
 +	if result != 0 {
