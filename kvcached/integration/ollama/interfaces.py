@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright contributors to the kvcached project
+# SPDX-License-Identifier: Apache-2.0
+
 import math
 import threading
 from typing import List, Optional, Tuple
@@ -7,9 +10,11 @@ import torch
 from kvcached.kv_cache_manager import KVCacheManager
 from kvcached.tp_ipc_util import start_worker_listener_thread
 from kvcached.utils import CONTIGUOUS_LAYOUT, PAGE_SIZE, get_kvcached_logger
-from kvcached.vmm_ops import create_kv_tensors
-from kvcached.vmm_ops import init_kvcached as _init_kvcached_impl
-from kvcached.vmm_ops import shutdown_kvcached as _shutdown_kvcached_impl
+from kvcached.vmm_ops import (
+    create_kv_tensors,
+    init_kvcached as _init_kvcached_impl,
+    shutdown_kvcached as _shutdown_kvcached_impl,
+)
 
 logger = get_kvcached_logger()
 
@@ -29,7 +34,7 @@ def init_kvcached(
     async_sched: bool = False,
 ) -> None:
     """Initialize kvcached for Ollama integration.
-    
+
     Args:
         tp_rank: Tensor parallel rank (0 for single GPU).
         tp_size: Number of tensor parallel processes.
@@ -243,7 +248,7 @@ def alloc_kv_bridge(num_blocks: int) -> List[int]:
 
 def free_kv_bridge(block_ids: List[int]) -> int:
     """Free specific KV cache blocks when no longer needed.
-    
+
     This function should be called when Ollama needs to free blocks that were
     allocated via alloc_kv_bridge().
 
@@ -300,10 +305,10 @@ def free_kv_bridge(block_ids: List[int]) -> int:
 def get_kv_cache_manager(num_blocks: int, block_size: int, cell_size: int,
                          num_layers: int) -> KVCacheManager:
     """Optional: Create/override KVCacheManager with custom parameters.
-    
+
     This is now optional since alloc_kv_cache() auto-creates the manager.
     Use this function if you need to override the manager with custom parameters.
-    
+
     Prerequisites: init_kvcached() must have been called
 
     Args:
