@@ -189,12 +189,17 @@ setup_ollama() {
     echo "   cd ollama-v0.11.8"
     echo "   LD_LIBRARY_PATH=./kvcached_bridge:$LD_LIBRARY_PATH \\"
     echo "   PYTHONPATH=/path/to/kvcached:$PYTHONPATH \\"
+    echo "   ENABLE_KVCACHED=true \\"
     echo "   go run . serve"
     echo ""
     echo "   # In another terminal:"
     echo "   LD_LIBRARY_PATH=./kvcached_bridge:$LD_LIBRARY_PATH \\"
     echo "   PYTHONPATH=/path/to/kvcached:$PYTHONPATH \\"
+    echo "   ENABLE_KVCACHED=true \\"
     echo "   go run . run gemma3"
+    echo ""
+    echo "Environment variables:"
+    echo "   ENABLE_KVCACHED=true/false  # Enable or disable kvcached integration (default: false)"
     popd
 }
 

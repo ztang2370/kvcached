@@ -48,14 +48,16 @@ Following the [Ollama developer guide](https://github.com/ollama/ollama#developm
 ```bash
 cd engine_integration/ollama-v0.11.8
 
-# Start the server
+# Start the server with kvcached enabled
 LD_LIBRARY_PATH=./kvcached_bridge:$LD_LIBRARY_PATH \
 PYTHONPATH=/path/to/kvcached:$PYTHONPATH \
+ENABLE_KVCACHED=true \
 go run . serve
 
 # In another terminal, run a model
 LD_LIBRARY_PATH=./kvcached_bridge:$LD_LIBRARY_PATH \
 PYTHONPATH=/path/to/kvcached:$PYTHONPATH \
+ENABLE_KVCACHED=true \
 go run . run gemma3
 ```
 
@@ -66,8 +68,16 @@ The integration works by:
 - **Patching Ollama**: Modifies Ollama's Go source code to include kvcached calls
 - **CGO Bridge**: Uses CGO to call Python interface functions from Go
 - **Python Interface**: Provides the same interface as vLLM/SGLang integrations
-- **Automatic Initialization**: kvcached starts automatically when Ollama loads a model
+- **Conditional Initialization**: kvcached starts when `ENABLE_KVCACHED=true` is set
 - **Memory Management**: Efficiently manages KV cache memory with virtual memory patterns
+
+## Environment Variables
+
+The following environment variables control the kvcached integration:
+
+- `ENABLE_KVCACHED=true/false`: Enable or disable kvcached integration (default: false)
+- `LD_LIBRARY_PATH`: Must include the path to the kvcached bridge library (`./kvcached_bridge`)
+- `PYTHONPATH`: Must include the path to the kvcached Python package
 
 ## CGO Bridge Implementation
 
@@ -258,18 +268,21 @@ uv pip install kvcached --no-build-isolation --no-cache-dir
 ### 8. Test the Integration
 
 ```bash
-# Test the integration
+# Test the integration with kvcached enabled
 OLLAMA_DEBUG=1 LD_LIBRARY_PATH=./kvcached_bridge:$LD_LIBRARY_PATH \
 PYTHONPATH=/path/to/kvcached:$PYTHONPATH \
+ENABLE_KVCACHED=true \
 go run . --version
 
 # Start the server
 OLLAMA_DEBUG=1 LD_LIBRARY_PATH=./kvcached_bridge:$LD_LIBRARY_PATH \
 PYTHONPATH=/path/to/kvcached:$PYTHONPATH \
+ENABLE_KVCACHED=true \
 go run . serve
 
 # In another terminal, test with a model
 OLLAMA_DEBUG=1 LD_LIBRARY_PATH=./kvcached_bridge:$LD_LIBRARY_PATH \
 PYTHONPATH=/path/to/kvcached:$PYTHONPATH \
+ENABLE_KVCACHED=true \
 go run . run gemma3
 ```
