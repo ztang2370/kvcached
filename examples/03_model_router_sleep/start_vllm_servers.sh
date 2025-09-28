@@ -23,15 +23,9 @@ usage() {
     echo "  --model-b MODEL     Model for endpoint2 (port 12347) [default: $MODEL_B]"
     echo "  --help              Show this help message"
     echo ""
-    echo "Environment variables:"
-    echo "  MODEL_A             Model for endpoint1 (can be overridden by --model-a)"
-    echo "  MODEL_B             Model for endpoint2 (can be overridden by --model-b)"
-    echo "  ENABLE_KVCACHED     Enable KVCached (default: true)"
-    echo ""
     echo "Examples:"
     echo "  $0"
-    echo "  $0 --model-a 'meta-llama/Llama-3.2-1B' --model-b 'microsoft/DialoGPT-small'"
-    echo "  MODEL_A='mistralai/Mistral-7B-v0.1' MODEL_B='facebook/opt-1.3b' $0"
+    echo "  $0 --model-a 'meta-llama/Llama-3.2-3B-Instruct' --model-b 'Qwen/Qwen1.5-1.8B'"
     exit 1
 }
 

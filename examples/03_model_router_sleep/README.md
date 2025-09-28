@@ -43,17 +43,10 @@ This script will:
 - `--model-a MODEL`: Model for endpoint1 (port 12346) - handles business, law, psychology, biology, chemistry, history, health, and general queries
 - `--model-b MODEL`: Model for endpoint2 (port 12347) - specializes in economics, math, physics, computer science, philosophy, and engineering
 
-**Examples:**
+**Example:**
 
 ```bash
-# Use different Qwen models
-./setup_semantic_router.sh --model-a "Qwen/Qwen2.5-3B-Instruct" --model-b "Qwen/Qwen2.5-7B-Instruct"
-
-# Use Llama models
-./setup_semantic_router.sh --model-a "meta-llama/Llama-3.2-3B-Instruct" --model-b "meta-llama/Llama-3.2-1B-Instruct"
-
-# Use environment variables
-MODEL_A="microsoft/DialoGPT-medium" MODEL_B="facebook/opt-1.3b" ./setup_semantic_router.sh
+./setup_semantic_router.sh --model-a "meta-llama/Llama-3.2-3B-Instruct" --model-b "Qwen/Qwen1.5-1.8B"
 ```
 
 ### 2. Start the Semantic Router Stack
@@ -67,7 +60,7 @@ This starts:
 - Semantic router service
 - Envoy proxy (port 8801)
 - Prometheus monitoring
-- Grafana dashboard (port 4000, admin/admin)
+- Grafana dashboard (port 3000, admin/admin)
 
 ### 3. Start vLLM Servers with KVCached
 
@@ -81,14 +74,10 @@ This starts:
 - `--model-a MODEL`: Model for endpoint1 (port 12346)
 - `--model-b MODEL`: Model for endpoint2 (port 12347)
 
-**Examples:**
+**Example:**
 
 ```bash
-# Use custom models
-./start_vllm_servers.sh --model-a "meta-llama/Llama-3.2-3B-Instruct" --model-b "microsoft/DialoGPT-small"
-
-# Use environment variables
-MODEL_A="facebook/opt-1.3b" MODEL_B="distilbert-base-uncased" ./start_vllm_servers.sh
+./start_vllm_servers.sh --model-a "meta-llama/Llama-3.2-3B-Instruct" --model-b "Qwen/Qwen1.5-1.8B"
 ```
 
 **Option B: Manual startup in separate terminals:**
@@ -175,23 +164,6 @@ cd ../examples/03_model_router_sleep
 ./test_routing.sh --model-a-name "meta-llama/Llama-3.2-3B-Instruct" --model-b-name "Qwen/Qwen1.5-1.8B"
 ```
 
-### Using Environment Variables
-
-```bash
-# Set models via environment variables
-export MODEL_A="microsoft/DialoGPT-medium"
-export MODEL_B="facebook/opt-1.3b"
-
-# Setup and start with environment variables
-./setup_semantic_router.sh
-cd semantic-router
-docker compose up --build
-cd ../examples/03_model_router_sleep
-# The convenience script automatically activates the vLLM KVCached virtual environment
-./start_vllm_servers.sh  # Uses MODEL_A and MODEL_B environment variables
-./test_routing.sh  # Uses MODEL_A_NAME and MODEL_B_NAME environment variables
-```
-
 ### Manual Setup
 
 ```bash
@@ -221,7 +193,7 @@ The semantic router uses category classification to route requests:
 
 ## Monitoring
 
-- **Grafana Dashboard**: http://localhost:4000 (admin/admin)
+- **Grafana Dashboard**: http://localhost:3000 (admin/admin)
 - **Prometheus**: http://localhost:9090
 
 ## Configuration
@@ -237,7 +209,7 @@ For detailed configuration options and advanced features, see the [vLLM Semantic
 
 ## Troubleshooting
 
-1. **Port conflicts**: Ensure ports 12346, 12347, 8801, 4000 are available
+1. **Port conflicts**: Ensure ports 12346, 12347, 8801, 3000 are available
 2. **GPU memory**: Monitor GPU usage with `nvidia-smi`
 3. **KVCached**: Verify `ENABLE_KVCACHED=true` is set
 4. **Docker networks**: Check that vLLM servers can communicate with the semantic router
@@ -248,3 +220,8 @@ For detailed configuration options and advanced features, see the [vLLM Semantic
 - `start_vllm_servers.sh`: Convenience script to start both vLLM servers with KVCached enabled in the background
 - `test_routing.sh`: Comprehensive testing script that sends various queries to verify semantic routing across different categories
 - `docker-compose.yml`: Docker Compose file for the semantic router stack (located in the semantic-router directory after setup, uses `docker compose` command)
+- `patches/`: Directory containing patch files for semantic router modifications
+  - `envoy_docker_yaml.patch`: Envoy proxy configuration for dynamic forwarding
+  - `request_handler_docker_gateway.patch`: Go code for Docker gateway IP mapping
+- `templates/`: Directory containing template files
+  - `config.yaml.template`: Semantic router configuration template with variable substitution

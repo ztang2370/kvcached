@@ -24,10 +24,6 @@ usage() {
     echo "  --model-b-name NAME    Expected name for model B (endpoint2) [default: $MODEL_B_NAME]"
     echo "  --help                 Show this help message"
     echo ""
-    echo "Environment variables:"
-    echo "  MODEL_A_NAME           Expected name for model A (can be overridden by --model-a-name)"
-    echo "  MODEL_B_NAME           Expected name for model B (can be overridden by --model-b-name)"
-    echo ""
     echo "Examples:"
     echo "  $0"
     echo "  $0 --model-a-name 'Llama-3.2-3B-Instruct' --model-b-name 'Qwen1.5-1.8B'"
@@ -92,16 +88,6 @@ send_request() {
     echo "Response preview: $(echo "$response" | head -c 200)..."
     echo ""
 }
-
-# # Check if semantic router is running
-# echo -e "${BLUE}Checking if semantic router is accessible...${NC}"
-# if curl -s --head "${SEMANTIC_ROUTER_URL}" > /dev/null; then
-#     echo -e "${GREEN}✓ Semantic router is accessible${NC}"
-# else
-#     echo -e "${RED}✗ Semantic router is not accessible at ${SEMANTIC_ROUTER_URL}${NC}"
-#     echo -e "${YELLOW}Make sure docker compose is running in the semantic-router directory${NC}"
-#     exit 1
-# fi
 
 echo ""
 
