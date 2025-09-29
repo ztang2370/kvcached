@@ -5,7 +5,7 @@ This example demonstrates running KVCached with the vLLM Semantic Router for int
 ## Scripts Overview
 
 ### `setup_semantic_router.sh`
-Sets up the semantic router by cloning the repository and applying necessary patches.
+Sets up the semantic router by cloning the repository, downloading classification models (≈1.5GB, first run only), and applying necessary patches.
 
 ```bash
 ./setup_semantic_router.sh --model-a MODEL_A --model-b MODEL_B

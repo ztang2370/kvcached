@@ -58,6 +58,41 @@ fi
 
 cd semantic-router
 
+# Install Hugging Face CLI if not present
+echo "Checking for Hugging Face CLI..."
+if ! command -v hf &> /dev/null; then
+    echo "Installing Hugging Face CLI..."
+    # Create virtual environment for model downloads
+    python3 -m venv .hf_venv
+    source .hf_venv/bin/activate
+    pip install huggingface-hub[hf-transfer]
+    if ! command -v hf &> /dev/null; then
+        echo "✗ Failed to install Hugging Face CLI"
+        deactivate
+        exit 1
+    fi
+    echo "✓ Hugging Face CLI installed successfully"
+else
+    echo "✓ Hugging Face CLI already installed"
+fi
+
+# Download classification models (≈1.5GB, first run only)
+echo "Downloading classification models..."
+if make download-models; then
+    echo "✓ Classification models downloaded successfully"
+    # Deactivate virtual environment after successful download (only if we activated it)
+    if [[ "$VIRTUAL_ENV" != "" ]]; then
+        deactivate 2>/dev/null || true
+    fi
+else
+    echo "✗ Failed to download classification models"
+    # Deactivate virtual environment on failure (only if we activated it)
+    if [[ "$VIRTUAL_ENV" != "" ]]; then
+        deactivate 2>/dev/null || true
+    fi
+    exit 1
+fi
+
 # Create config directory if it doesn't exist
 mkdir -p config
 
