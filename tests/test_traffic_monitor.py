@@ -249,8 +249,11 @@ class TrafficMonitorTest:
                     print(
                         f"❌ Server not responding: {health_result.get('error', 'Unknown error')}"
                     )
+                    config = load_config_from_file()
+                    router_config = config.get("router", {})
+                    port = router_config.get("router_port", 8080)
                     print(
-                        "Start server with `python frontend.py --config example-config.yaml --port 8080` under the controller folder."
+                        f"Start server with `python frontend.py --config example-config.yaml --port {port}` under the controller folder."
                     )
                     return
                 print("✅ Server is responding")
