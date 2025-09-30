@@ -17,7 +17,7 @@ from kvcached.utils import get_kvcached_logger
 logger = get_kvcached_logger()
 
 
-def list_kvcached_sessions() -> List[str]:
+def _list_kvcached_sessions() -> List[str]:
     """List all running kvcached tmux sessions."""
     try:
         result = subprocess.run(
@@ -32,9 +32,9 @@ def list_kvcached_sessions() -> List[str]:
         return []
 
 
-def kill_all_kvcached_sessions() -> None:
+def _kill_all_kvcached_sessions() -> None:
     """Kill all running kvcached tmux sessions."""
-    sessions = list_kvcached_sessions()
+    sessions = _list_kvcached_sessions()
     if not sessions:
         logger.info("No kvcached tmux sessions found.")
         return
@@ -315,11 +315,11 @@ def main() -> None:
 
     # Handle special command flags
     if args.kill_all:
-        kill_all_kvcached_sessions()
+        _kill_all_kvcached_sessions()
         return
 
     if args.list_sessions:
-        sessions = list_kvcached_sessions()
+        sessions = _list_kvcached_sessions()
         if sessions:
             print("Running kvcached tmux sessions:")
             for session in sessions:
