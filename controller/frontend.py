@@ -463,7 +463,7 @@ class MultiLLMFrontend:
                 "idle_threshold_seconds":
                 self.sleep_manager.config.idle_threshold_seconds,
                 "wakeup_on_request":
-                self.sleep_manager.config.wake_on_request
+                self.sleep_manager.config.wakeup_on_request
             }),
                                 status=200,
                                 content_type='application/json')
