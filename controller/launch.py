@@ -17,6 +17,36 @@ from kvcached.utils import get_kvcached_logger
 logger = get_kvcached_logger()
 
 
+def list_kvcached_sessions() -> List[str]:
+    """List all running kvcached tmux sessions."""
+    try:
+        result = subprocess.run(
+            ["tmux", "list-sessions", "-F", "#{session_name}"],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        sessions = [s for s in result.stdout.strip().split('\n') if s.startswith('kvcached-')]
+        return sessions
+    except subprocess.CalledProcessError:
+        return []
+
+
+def kill_all_kvcached_sessions() -> None:
+    """Kill all running kvcached tmux sessions."""
+    sessions = list_kvcached_sessions()
+    if not sessions:
+        logger.info("No kvcached tmux sessions found.")
+        return
+
+    for session in sessions:
+        logger.info("Killing tmux session: %s", session)
+        try:
+            subprocess.run(["tmux", "kill-session", "-t", session], check=True)
+        except subprocess.CalledProcessError as e:
+            logger.error("Failed to kill session %s: %s", session, e)
+
+
 def _parse_cfg(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Parse and validate the YAML configuration.
 
@@ -253,6 +283,12 @@ def main() -> None:
                         type=Path,
                         default="example-config.yaml",
                         help="Path to YAML config file")
+    parser.add_argument("--kill-all",
+                        action="store_true",
+                        help="Kill all existing kvcached tmux sessions and exit")
+    parser.add_argument("--list-sessions",
+                        action="store_true",
+                        help="List all running kvcached tmux sessions and exit")
     args = parser.parse_args()
 
     cfg_path = args.config.expanduser().resolve()
@@ -276,6 +312,21 @@ def main() -> None:
     except Exception as e:
         logger.error("Invalid configuration: %s", e)
         sys.exit(1)
+
+    # Handle special command flags
+    if args.kill_all:
+        kill_all_kvcached_sessions()
+        return
+
+    if args.list_sessions:
+        sessions = list_kvcached_sessions()
+        if sessions:
+            print("Running kvcached tmux sessions:")
+            for session in sessions:
+                print(f"  - {session}")
+        else:
+            print("No kvcached tmux sessions found.")
+        return
 
     # Extract launch delay from top-level configuration
     launch_delay = raw_cfg.get("launch_delay_seconds", 0)
