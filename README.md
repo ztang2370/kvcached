@@ -1,15 +1,58 @@
-# kvcached
+<div align="center">
+  <img src="assets/logo-v2.svg" alt="kvcached logo" height="96" />
 
-kvcached is a new KV cache management system that supports on-demand KV cache allocation. It implements the concept of GPU virtual memory, allowing applications to reserve virtual address space without immediately committing physical memory. Physical memory is then automatically allocated and mapped as needed at runtime. This capability allows multiple LLMs to run concurrently on a single GPU or a group of GPUs (TP) and flexibly share the GPU memory, significantly improving GPU utilization and reducing memory fragmentation.
+  <br>
+  <br>
+  <p>
+    <a href="https://www.python.org/"><img alt="Python" src="https://img.shields.io/badge/python-3.9%20%7C%203.10%20%7C%203.11%20%7C%203.12-blue"></a>
+    <img alt="Engines" src="https://img.shields.io/badge/engines-SGLang%20%7C%20vLLM-blueviolet">
+    <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/License-Apache_2.0-blue.svg"></a>
+  </p>
 
-kvcached is compatible with popular LLM serving engines, including SGLang and vLLM.
+</div>
 
-## kvcached Installation
+<h2 align="center">Virtualized Elastic KV Cache for Dynamic GPU Sharing and Beyond </h2>
+
+kvcached is a new KV cache management system that enables **elastic KV cache** memory for autoregressive LLMs. It brings the benefits of **virtual memory** in operating systems to LLM serving: instead of statically reserving large blocks of GPU memory at startup (the common practice today), it allows serving engines to **allocate and release KV cache on demand** based on actual workload needs.
+
+<p align="center">
+  <img src="assets/vmm.svg" alt="kvcached virtual memory model" width="600" />
+</p>
+
+<h3 align="left">Key Features</h3>
+
+- 🔄 **Elastic KV cache**: allocate and reclaim KV memory dynamically to match live load.
+- 🗺️ **GPU virtual memory**: decouple logical KV from physical GPU memory via runtime mapping.
+- 🛠️ **Memory control CLI**: enforce memory limits with kvcached CLI.
+- 🧭 **Frontend router and sleep manager**: route requests to the corresponding backend and put models to sleep when idle.
+- 🤝 **Support SGLang and vLLM**: integrate with SGLang and vLLM.
+
+<h3 align="left">Example use cases</h3>
+
+- 🔀 **Multi‑LLM serving**: kvcached allows multiple LLMs to share a GPU's memory elastically, enabling concurrent deployment without the rigid memory partitioning used today. This improves GPU utilization and saves serving costs.
+- ⚡ **Serverless LLM**: By allocating KV cache only when needed, kvcached supports serverless deployments where models can spin up and down on demand.
+- 🧩 **Compound AI systems**: kvcached makes compound AI systems practical on limited hardware by elastically allocating memory across specialized models in a pipeline (e.g., retrieval, reasoning, and summarization).
+- 🖥️ **GPU workload colocation**: kvcached allows LLM inference to coexist with other GPU workloads such as training jobs, fine-tuning, or vision models.
+
+See concrete example here: [kvcached/examples](./examples).
+
+## Performance: Dynamic memory sharing
+
+kvcached enables dynamic memory sharing between LLMs, allowing them to share the same GPU memory elastically. As a comparison, the current serving engines need to statically reserve GPU memory at startup.
+
+This benchmark shows the performance benefits of kvcached when serving three `Llama-3.1-8B` models on an A100-80G GPU under workloads with intermittent peaks. Details can be found in [benchmarks/bench_latency_benefit](./benchmarks/bench_latency_benefit).
+
+<p align="center">
+  <img src="assets/ttft_results/ttft_mean.png" alt="TTFT mean" width="400" />
+  <img src="assets/ttft_results/ttft_p99.png" alt="TTFT p99" width="400" style="margin-left:12px;" />
+</p>
+
+## Installation
 
 ### Prerequisites
 
-* Python (tested with 3.9 - 3.11)
-* PyTorch (compatible with SGLang and vLLM)
+- Python (tested with 3.9 - 3.12)
+- PyTorch (compatible with SGLang and vLLM)
 
 kvcached can be installed as a plugin with SGLang and vLLM.
 
