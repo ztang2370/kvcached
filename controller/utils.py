@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the kvcached project
 # SPDX-License-Identifier: Apache-2.0
 
+import argparse
 import resource
 import shlex
 import subprocess
@@ -41,21 +42,16 @@ def extract_models_mapping(
                 arg_list.extend(shlex.split(str(item)))
 
         # Detect --host / --port options
-        for idx, token in enumerate(arg_list):
-            if token.startswith("--host="):
-                host = token.split("=", 1)[1]
-            elif token == "--host" and idx + 1 < len(arg_list):
-                host = arg_list[idx + 1]
-            elif token.startswith("--port="):
-                try:
-                    port = int(token.split("=", 1)[1])
-                except ValueError:
-                    pass
-            elif token == "--port" and idx + 1 < len(arg_list):
-                try:
-                    port = int(arg_list[idx + 1])
-                except ValueError:
-                    pass
+        parser = argparse.ArgumentParser(add_help=False)
+        parser.add_argument("--host")
+        parser.add_argument("--port", type=int)
+
+        known_args, _ = parser.parse_known_args(arg_list)
+
+        if known_args.host:
+            host = known_args.host
+        if known_args.port is not None:
+            port = known_args.port
 
         if port is None:
             logger.warning(

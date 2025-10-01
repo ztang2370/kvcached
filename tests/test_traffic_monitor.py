@@ -38,12 +38,10 @@ class TrafficMonitorTest:
             self.base_url = f"http://{host}:{port}"
 
         # Extract model names from pre-loaded config
-        self.test_models = []
-        instances = CONFIG.get("instances", [])
-        for instance in instances:
-            model_name = instance.get("model")
-            if model_name:
-                self.test_models.append(model_name)
+        self.test_models = [
+            model_name for instance in CONFIG.get("instances", [])
+            if (model_name := instance.get("model"))
+        ]
 
     async def test_endpoint(
             self,
