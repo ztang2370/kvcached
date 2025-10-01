@@ -28,7 +28,6 @@ def load_config_models():
     with config_path.open("r") as f:
         config = yaml.safe_load(f)
 
-    # Use the shared, more robust extract_models_mapping function
     models_mapping = extract_models_mapping(config)
 
     # Transform the result to the format expected by tests
@@ -50,7 +49,6 @@ def load_config_models():
     return models
 
 
-# Load model configurations once at module level for efficiency
 MODELS_CONFIG = load_config_models()
 
 
