@@ -16,6 +16,9 @@ from kvcached.utils import get_kvcached_logger
 
 logger = get_kvcached_logger()
 
+# Tmux session name prefix for kvcached sessions
+TMUX_SESSION_PREFIX = "kvcached-"
+
 
 def _list_kvcached_sessions() -> List[str]:
     """List all running kvcached tmux sessions."""
@@ -26,7 +29,7 @@ def _list_kvcached_sessions() -> List[str]:
             text=True,
             check=True
         )
-        sessions = [s for s in result.stdout.strip().split('\n') if s.startswith('kvcached-')]
+        sessions = [s for s in result.stdout.strip().split('\n') if s.startswith(TMUX_SESSION_PREFIX)]
         return sessions
     except (subprocess.CalledProcessError, FileNotFoundError):
         return []
@@ -167,7 +170,7 @@ def _launch_instances(instances_cfg: List[Dict[str, Any]],
     launched: List[Dict[str, Any]] = []
 
     for idx, inst in enumerate(instances_cfg):
-        session_name = f"kvcached-{inst['name']}"
+        session_name = f"{TMUX_SESSION_PREFIX}{inst['name']}"
 
         # Ensure tmux session exists (detached)
         if not ensure_tmux_session(session_name):
@@ -203,7 +206,7 @@ def _maybe_launch_router(router_cfg: Dict[str, Any],
         logger.info("Router launch disabled via configuration.")
         return
 
-    frontend_session = "kvcached-frontend"
+    frontend_session = f"{TMUX_SESSION_PREFIX}frontend"
     if not ensure_tmux_session(frontend_session):
         return
 
