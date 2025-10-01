@@ -5,11 +5,74 @@ import resource
 import shlex
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from kvcached.utils import get_kvcached_logger
 
 logger = get_kvcached_logger()
+
+
+def extract_models_mapping(
+        raw_cfg: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """Build the model→endpoint mapping consumed by the router frontend.
+
+    This mirrors the logic in controller.launch so that the frontend can run
+    standalone given only the master YAML config file.
+    """
+
+    models_mapping: Dict[str, Dict[str, Any]] = {}
+
+    for inst in raw_cfg.get("instances", []):
+        model_name = inst["model"]
+        engine_name = inst["engine"]
+
+        # Defaults
+        host: str = "localhost"
+        port: Optional[int] = None
+
+        raw_args = inst.get("engine_args", inst.get("args", []))
+
+        # Normalize args to a flat list of strings
+        if isinstance(raw_args, str):
+            arg_list: List[str] = shlex.split(raw_args)
+        else:
+            arg_list: List[str] = []
+            for item in raw_args:
+                arg_list.extend(shlex.split(str(item)))
+
+        # Detect --host / --port options
+        for idx, token in enumerate(arg_list):
+            if token.startswith("--host="):
+                host = token.split("=", 1)[1]
+            elif token == "--host" and idx + 1 < len(arg_list):
+                host = arg_list[idx + 1]
+            elif token.startswith("--port="):
+                try:
+                    port = int(token.split("=", 1)[1])
+                except ValueError:
+                    pass
+            elif token == "--port" and idx + 1 < len(arg_list):
+                try:
+                    port = int(arg_list[idx + 1])
+                except ValueError:
+                    pass
+
+        if port is None:
+            logger.warning(
+                "Could not determine port for model %s – skipping in router mapping",
+                model_name,
+            )
+            continue
+
+        models_mapping[model_name] = {
+            "endpoint": {
+                "host": host,
+                "port": port,
+                "engine": engine_name
+            }
+        }
+
+    return models_mapping
 
 
 # Ensure this process has a sufficiently high file-descriptor limit.

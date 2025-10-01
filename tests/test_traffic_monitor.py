@@ -24,38 +24,30 @@ def load_config_from_file():
     return config
 
 
-def load_models_from_config() -> List[str]:
-    """Load model names from example-config.yaml"""
-    config = load_config_from_file()
-
-    models = []
-    instances = config.get("instances", [])
-
-    for instance in instances:
-        model_name = instance.get("model")
-        if model_name:
-            models.append(model_name)
-
-    return models
-
-
-def load_router_url_from_config() -> str:
-    """Load router URL from example-config.yaml"""
-    config = load_config_from_file()
-
-    router_config = config.get("router", {})
-    host = router_config.get("router_host", "localhost")
-    port = router_config.get("router_port", 8080)
-
-    return f"http://{host}:{port}"
+# Load configuration once at module level for efficiency
+CONFIG = load_config_from_file()
 
 
 class TrafficMonitorTest:
     """Test suite for traffic monitoring functionality"""
 
     def __init__(self, base_url: Optional[str] = None):
-        self.base_url = base_url or load_router_url_from_config()
-        self.test_models = load_models_from_config()
+        if base_url:
+            self.base_url = base_url
+        else:
+            # Extract router URL from pre-loaded config
+            router_config = CONFIG.get("router", {})
+            host = router_config.get("router_host", "localhost")
+            port = router_config.get("router_port", 8080)
+            self.base_url = f"http://{host}:{port}"
+
+        # Extract model names from pre-loaded config
+        self.test_models = []
+        instances = CONFIG.get("instances", [])
+        for instance in instances:
+            model_name = instance.get("model")
+            if model_name:
+                self.test_models.append(model_name)
 
     async def test_endpoint(
             self,
@@ -249,8 +241,7 @@ class TrafficMonitorTest:
                     print(
                         f"❌ Server not responding: {health_result.get('error', 'Unknown error')}"
                     )
-                    config = load_config_from_file()
-                    router_config = config.get("router", {})
+                    router_config = CONFIG.get("router", {})
                     port = router_config.get("router_port", 8080)
                     print(
                         f"Start server with `python frontend.py --config example-config.yaml --port {port}` under the controller folder."
@@ -330,8 +321,7 @@ async def main():
 
     args = parser.parse_args()
 
-    config = load_config_from_file()
-    router_config = config.get("router", {})
+    router_config = CONFIG.get("router", {})
     port = router_config.get("router_port", 8080)
 
     print("Traffic Monitor Test Suite")

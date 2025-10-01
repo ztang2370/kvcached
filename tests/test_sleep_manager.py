@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "controller"))
 
 from controller.sleep_manager import SleepConfig, SleepManager
 from controller.traffic_monitor import TrafficMonitor
+from controller.utils import extract_models_mapping
 
 
 def load_config_models():
@@ -27,22 +28,19 @@ def load_config_models():
     with config_path.open("r") as f:
         config = yaml.safe_load(f)
 
+    # Use the shared, more robust extract_models_mapping function
+    models_mapping = extract_models_mapping(config)
+
+    # Transform the result to the format expected by tests
     models: Dict[str, List[Dict[str, str]]] = {"vllm": [], "sglang": []}
-    instances = config.get("instances", [])
 
-    for instance in instances:
-        engine = instance.get("engine")
-        model_name = instance["model"]
-        host = "localhost"  # default
-        port = None
+    for model_name, mapping in models_mapping.items():
+        endpoint = mapping["endpoint"]
+        engine = endpoint["engine"]
+        host = endpoint["host"]
+        port = str(endpoint["port"])  # Convert to string for consistency
 
-        for arg in instance.get("engine_args", []):
-            if arg.startswith("--host="):
-                host = arg.split("=", 1)[1]
-            elif arg.startswith("--port="):
-                port = arg.split("=", 1)[1]
-
-        if port and engine in models:
+        if engine in models:
             models[engine].append({
                 "name": model_name,
                 "host": host,
@@ -50,6 +48,10 @@ def load_config_models():
             })
 
     return models
+
+
+# Load model configurations once at module level for efficiency
+MODELS_CONFIG = load_config_models()
 
 
 async def test_basic_functionality():
@@ -74,9 +76,8 @@ async def test_real_vllm_instances(manager):
     """Test with real vLLM instances from example-config.yaml"""
     print("\n=== Testing Real vLLM Instances ===")
 
-    # Load vLLM models from config
-    models_config = load_config_models()
-    vllm_models = models_config["vllm"]
+    # Load vLLM models from the pre-loaded config
+    vllm_models = MODELS_CONFIG["vllm"]
 
     # Add vLLM instances from the config
     for model_info in vllm_models:
@@ -95,9 +96,8 @@ async def test_sglang_configuration(manager):
     """Test SGLang model configuration management"""
     print("\n=== Testing SGLang Configuration ===")
 
-    # Load SGLang models from config
-    models_config = load_config_models()
-    sglang_models_config = models_config["sglang"]
+    # Load SGLang models from the pre-loaded config
+    sglang_models_config = MODELS_CONFIG["sglang"]
 
     # Add SGLang models from config
     for model_info in sglang_models_config:
@@ -123,9 +123,8 @@ async def test_sleep_wake_functionality(manager):
     """Test actual sleep and wake functionality with real vLLM instances"""
     print("\n=== Testing Sleep/Wake Functionality ===")
 
-    # Load vLLM models from config and test with the first one
-    models_config = load_config_models()
-    vllm_models = models_config["vllm"]
+    # Load vLLM models from the pre-loaded config and test with the first one
+    vllm_models = MODELS_CONFIG["vllm"]
     if not vllm_models:
         print("⚠ No vLLM models found in config, skipping sleep/wake test")
         return
@@ -186,9 +185,8 @@ async def test_sglang_sleep_wake_functionality(manager):
     """Test actual sleep and wake functionality with SGLang instances"""
     print("\n=== Testing SGLang Sleep/Wake Functionality ===")
 
-    # Load SGLang models from config and test with the first one
-    models_config = load_config_models()
-    sglang_models = models_config["sglang"]
+    # Load SGLang models from the pre-loaded config and test with the first one
+    sglang_models = MODELS_CONFIG["sglang"]
     if not sglang_models:
         print("⚠ No SGLang models found in config, skipping SGLang sleep/wake test")
         return
@@ -321,8 +319,7 @@ async def test_sglang_api_methods_simulation(manager):
     print(f"  get_sglang_models: {hasattr(manager, 'get_sglang_models')}")
 
     # Test model detection logic
-    models_config = load_config_models()
-    sglang_models = models_config["sglang"]
+    sglang_models = MODELS_CONFIG["sglang"]
     if sglang_models:
         test_model = sglang_models[0]["name"]
         print(f"\n✓ Model type detection for '{test_model}':")
