@@ -19,7 +19,7 @@ import aiohttp
 sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent.parent / "controller"))
 
-from tests.utils import load_example_config
+from tests.test_utils import load_example_config
 
 
 def load_config_from_file():

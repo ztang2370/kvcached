@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "controller"))
 from controller.sleep_manager import SleepConfig, SleepManager
 from controller.traffic_monitor import TrafficMonitor
 from controller.utils import extract_models_mapping
-from tests.utils import load_example_config
+from tests.test_utils import load_example_config
 
 
 def load_config_models():
