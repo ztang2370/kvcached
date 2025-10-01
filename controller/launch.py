@@ -278,9 +278,7 @@ def main() -> None:
     if args.list_sessions:
         sessions = _list_kvcached_sessions()
         if sessions:
-            logger.info("Running kvcached tmux sessions:")
-            for session in sessions:
-                logger.info(f"  - {session}")
+            logger.info("Running kvcached tmux sessions: %s", ", ".join(sessions))
         else:
             logger.info("No kvcached tmux sessions found.")
         return
