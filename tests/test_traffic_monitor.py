@@ -9,19 +9,22 @@ Comprehensive test script for traffic monitoring functionality
 import argparse
 import asyncio
 import random
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import aiohttp
-import yaml
+
+# Add the controller directory to the path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent / "controller"))
+
+from tests.utils import load_example_config
 
 
 def load_config_from_file():
     """Load configuration from example-config.yaml"""
-    config_path = Path(__file__).parent.parent / "controller" / "example-config.yaml"
-    with config_path.open("r") as f:
-        config = yaml.safe_load(f)
-    return config
+    return load_example_config()
 
 
 # Load configuration once at module level for efficiency

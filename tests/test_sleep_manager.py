@@ -11,8 +11,6 @@ import sys
 from pathlib import Path
 from typing import Dict, List
 
-import yaml
-
 # Add the controller directory to the path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent.parent / "controller"))
@@ -20,13 +18,12 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "controller"))
 from controller.sleep_manager import SleepConfig, SleepManager
 from controller.traffic_monitor import TrafficMonitor
 from controller.utils import extract_models_mapping
+from tests.utils import load_example_config
 
 
 def load_config_models():
     """Load model configurations from example-config.yaml"""
-    config_path = Path(__file__).parent.parent / "controller" / "example-config.yaml"
-    with config_path.open("r") as f:
-        config = yaml.safe_load(f)
+    config = load_example_config()
 
     models_mapping = extract_models_mapping(config)
 
