@@ -28,7 +28,7 @@ def _list_kvcached_sessions() -> List[str]:
         )
         sessions = [s for s in result.stdout.strip().split('\n') if s.startswith('kvcached-')]
         return sessions
-    except subprocess.CalledProcessError:
+    except (subprocess.CalledProcessError, FileNotFoundError):
         return []
 
 
@@ -43,7 +43,7 @@ def _kill_all_kvcached_sessions() -> None:
         logger.info("Killing tmux session: %s", session)
         try:
             subprocess.run(["tmux", "kill-session", "-t", session], check=True)
-        except subprocess.CalledProcessError as e:
+        except (subprocess.CalledProcessError, FileNotFoundError) as e:
             logger.error("Failed to kill session %s: %s", session, e)
 
 
@@ -160,53 +160,6 @@ def _build_command(inst: Dict[str, Any]) -> List[str]:
     return cmd
 
 
-def _extract_models_mapping(
-        raw_cfg: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
-    """Build the model→endpoint mapping consumed by the router frontend."""
-    models_mapping: Dict[str, Dict[str, Any]] = {}
-
-    for inst in raw_cfg.get("instances", []):
-        model_name = inst["model"]
-
-        # Defaults
-        host = "localhost"
-        port = None
-
-        raw_args = inst.get("engine_args", inst.get("args", []))
-        if isinstance(raw_args, str):
-            arg_list = shlex.split(raw_args)
-        else:
-            arg_list: List[str] = []
-            for item in raw_args:
-                arg_list.extend(shlex.split(str(item)))
-
-        for idx, token in enumerate(arg_list):
-            if token.startswith("--host="):
-                host = token.split("=", 1)[1]
-            elif token == "--host" and idx + 1 < len(arg_list):
-                host = arg_list[idx + 1]
-            elif token.startswith("--port="):
-                try:
-                    port = int(token.split("=", 1)[1])
-                except ValueError:
-                    pass
-            elif token == "--port" and idx + 1 < len(arg_list):
-                try:
-                    port = int(arg_list[idx + 1])
-                except ValueError:
-                    pass
-
-        if port is None:
-            logger.warning(
-                "Could not determine port for model %s – skipping in router mapping",
-                model_name)
-            continue
-
-        models_mapping[model_name] = {"endpoint": {"host": host, "port": port}}
-
-    return models_mapping
-
-
 def _launch_instances(instances_cfg: List[Dict[str, Any]],
                       global_env: Dict[str, str],
                       launch_delay: int = 0) -> List[Dict[str, Any]]:
@@ -283,12 +236,13 @@ def main() -> None:
                         type=Path,
                         default="example-config.yaml",
                         help="Path to YAML config file")
-    parser.add_argument("--kill-all",
-                        action="store_true",
-                        help="Kill all existing kvcached tmux sessions and exit")
-    parser.add_argument("--list-sessions",
-                        action="store_true",
-                        help="List all running kvcached tmux sessions and exit")
+    session_group = parser.add_mutually_exclusive_group()
+    session_group.add_argument("--kill-all",
+                               action="store_true",
+                               help="Kill all existing kvcached tmux sessions and exit")
+    session_group.add_argument("--list-sessions",
+                               action="store_true",
+                               help="List all running kvcached tmux sessions and exit")
     args = parser.parse_args()
 
     cfg_path = args.config.expanduser().resolve()
