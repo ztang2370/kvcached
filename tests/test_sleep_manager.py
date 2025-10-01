@@ -15,10 +15,11 @@ from typing import Dict, List
 sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent.parent / "controller"))
 
+from test_utils import load_example_config
+
 from controller.sleep_manager import SleepConfig, SleepManager
 from controller.traffic_monitor import TrafficMonitor
 from controller.utils import extract_models_mapping
-from tests.test_utils import load_example_config
 
 
 def load_config_models():

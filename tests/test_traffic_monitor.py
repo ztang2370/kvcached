@@ -9,17 +9,10 @@ Comprehensive test script for traffic monitoring functionality
 import argparse
 import asyncio
 import random
-import sys
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import aiohttp
-
-# Add the controller directory to the path
-sys.path.insert(0, str(Path(__file__).parent.parent))
-sys.path.insert(0, str(Path(__file__).parent.parent / "controller"))
-
-from tests.test_utils import load_example_config
+from test_utils import load_example_config
 
 
 def load_config_from_file():
