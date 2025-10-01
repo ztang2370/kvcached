@@ -278,11 +278,11 @@ def main() -> None:
     if args.list_sessions:
         sessions = _list_kvcached_sessions()
         if sessions:
-            print("Running kvcached tmux sessions:")
+            logger.info("Running kvcached tmux sessions:")
             for session in sessions:
-                print(f"  - {session}")
+                logger.info(f"  - {session}")
         else:
-            print("No kvcached tmux sessions found.")
+            logger.info("No kvcached tmux sessions found.")
         return
 
     # Extract launch delay from top-level configuration
