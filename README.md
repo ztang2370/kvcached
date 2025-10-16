@@ -89,34 +89,24 @@ Details can be found in [benchmarks/bench_latency_benefit](./benchmarks/bench_la
 ### Prerequisites
 
 - Python (tested with 3.9 - 3.12)
-- PyTorch (compatible with SGLang and vLLM)
+- SGLang (tested with v0.5.2) or vLLM (tested with v0.10.2)
 
-kvcached can be installed as a plugin with SGLang and vLLM.
+kvcached can be installed as a plugin with existing SGLang or vLLM environment.
 
-### Quick Install
-
-To install kvcached into an existing SGLang or vLLM environment:
+### Install from PyPI
 
 ```bash
 pip install kvcached --no-build-isolation
 ```
 
-### All-in-One Setup Script
-
-For a complete setup with kvcached and a specific inference engine version, use our automated setup script. This script creates a separate virtual environment (using `uv`) and installs kvcached with your chosen engine:
+### Install from source
 
 ```bash
-cd engine_integration/scripts
-# check installation instructions
-./setup.sh --help
+# under the project root folder
 
-# install kvcached with SGLang v0.4.9
-./setup.sh --engine sglang --engine-version 0.4.9
-# install kvcached with vLLM v0.10.1
-./setup.sh --engine vllm --engine-version 0.10.1
+pip install -e . --no-build-isolation --no-cache-dir
+python tools/dev_copy_pth.py
 ```
-
-This script will install the specified versions of engines, create separate venv environments (using `uv`), and install kvcached. Should you require more versions, please let us know by opening an issue.
 
 ## Run kvcached with Docker
 
@@ -139,15 +129,32 @@ More instructions can be found [here](./docker/README.md). GB200 dockers are on 
 
 ## Testing
 
-kvcached can be enabled or disabled by `export ENABLE_KVCACHED=true` or `false`.
+kvcached can be enabled by setting the following environmental variables:
 
-If you are using the engine-specific dockers, you can test kvcached by running the original engines' benchmark scripts.
+```bash
+export ENABLE_KVCACHED=true
+export KVCACHED_AUTOPATCH=1
 
-If you installed kvcached using its source code, you can do the following:
+# memory stats ipc name (optional)
+export KVCACHED_IPC_NAME=[SGLANG|VLLM]
+```
+
+If you are using the engine-specific dockers, you can test kvcached by running the original engines' benchmark scripts. For example:
+
+```bash
+# for sglang
+python -m sglang.launch_server --model meta-llama/Llama-3.2-1B --disable-radix-cache --port 30000
+python -m sglang.bench_serving --backend sglang-oai --model meta-llama/Llama-3.2-1B --dataset-name sharegpt --request-rate 10 --num-prompts 1000 --port 30000
+
+# for vllm
+vllm serve meta-llama/Llama-3.2-1B --disable-log-requests --no-enable-prefix-caching --port=12346
+vllm bench serve --model meta-llama/Llama-3.2-1B --request-rate 10 --num-prompts 1000 --port 12346
+```
+
+If you installed kvcached using its source code, you can also do the following:
 
 ```bash
 cd benchmarks/simple_bench
-export VENV_PATH=../../engine_integration/[sglang|vllm]-kvcached-venv
 ./start_server.sh [sglang|vllm] --venv-path $VENV_PATH --model meta-llama/Llama-3.2-1B
 # Wait until LLM server is ready
 ./start_client.sh [sglang|vllm] --venv-path $VENV_PATH --model meta-llama/Llama-3.2-1B
