@@ -4,8 +4,12 @@
   <br>
   <br>
   <p>
-    <a href="https://www.python.org/"><img alt="Python" src="https://img.shields.io/badge/python-3.9%E2%80%933.12-blue"></a>
-    <img alt="Engines" src="https://img.shields.io/badge/engines-SGLang%20%7C%20vLLM-blueviolet">
+    <a href="https://www.python.org/"><img alt="Python" src="https://img.shields.io/badge/Python-3.9%E2%80%933.12-blue"></a>
+    <img alt="Engines" src="https://img.shields.io/badge/Engines-SGLang%20%7C%20vLLM-blueviolet">
+    <a href="https://yifanqiao.notion.site/Solve-the-GPU-Cost-Crisis-with-kvcached-289da9d1f4d68034b17bf2774201b141"><img alt="Blog" src="https://img.shields.io/badge/Blog-Read-FF5722?logo=rss&logoColor=white&labelColor=555555"></a>
+    <a href="https://arxiv.org/abs/2508.08448"><img alt="arXiv: GPU OS vision" src="https://img.shields.io/badge/arXiv-GPU%20OS%20vision-b31b1b?logo=arxiv&logoColor=white&labelColor=555555"></a>
+    <br>
+    <a href="https://arxiv.org/abs/2505.04021"><img alt="arXiv: Multi LLM Serving" src="https://img.shields.io/badge/arXiv-Multi%20LLM%20Serving-b31b1b?logo=arxiv&logoColor=white&labelColor=555555"></a>
     <a href="https://join.slack.com/t/ovg-project/shared_invite/zt-3fr01t8s7-ZtDhHSJQ00hcLHgwKx3Dmw"><img alt="Slack Join" src="https://img.shields.io/badge/Slack-Join-4A154B?logo=slack&logoColor=white&labelColor=555555"></a>
     <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/License-Apache_2.0-blue.svg"></a>
   </p>
@@ -15,12 +19,12 @@
 <h2 align="center">Make GPU Sharing Flexible and Easy </h2>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/ovg-project/kvcached/refs/heads/main/assets/ads.svg" alt="Make GPU Sharing Flexible and Easy" width="500" />
+  <img src="https://raw.githubusercontent.com/ovg-project/kvcached/refs/heads/main/assets/ads.jpg" alt="Make GPU Sharing Flexible and Easy" width="500" />
 </p>
 
 kvcached is a KV cache library for LLM serving/training on **shared GPUs**.  By bringing OS-style **virtual memory** abstraction to LLM systems, it enables **elastic and demand-driven** KV cache allocation, improving GPU utilization under dynamic workloads.
 
-kvcached achieves this by decoupling GPU virtual addressing from physical memory allocation for KV caches. It allows serving engines to initially reserve virtual memory only and later back it with physical GPU memory when the cache is actively used. This decoupling enables on-demand allocation and flexible sharing, bringing better GPU memory utilization under dynamic and mixed workloads. Check out more details in the [blog](#).
+kvcached achieves this by decoupling GPU virtual addressing from physical memory allocation for KV caches. It allows serving engines to initially reserve virtual memory only and later back it with physical GPU memory when the cache is actively used. This decoupling enables on-demand allocation and flexible sharing, bringing better GPU memory utilization under dynamic and mixed workloads. Check out more details in the [blog](https://yifanqiao.notion.site/Solve-the-GPU-Cost-Crisis-with-kvcached-289da9d1f4d68034b17bf2774201b141).
 
 <!-- <p align="center">
   <img src="https://raw.githubusercontent.com/ovg-project/kvcached/refs/heads/main/assets/vmm_v2.svg" alt="kvcached virtual memory model" width="600" />
@@ -74,14 +78,22 @@ kvcached achieves this by decoupling GPU virtual addressing from physical memory
 
 </div>
 
-See concrete examples here: [kvcached/examples](./examples).
+See concrete examples here: [kvcached/examples](https://github.com/ovg-project/kvcached/tree/main/examples).
+
+## kvcached in action
+
+The following simple example shows how kvcached enables an unmodified vLLM engine run with dynamically allocated memory.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/ovg-project/kvcached/refs/heads/main/assets/kvcached-example.gif" alt="kvcached in action" width="90%">
+</p>
 
 ## Performance: Multi-LLM serving
 
 kvcached enables dynamic memory sharing between LLMs, allowing them to share the same GPU memory elastically. As a comparison, the current serving engines need to statically reserve GPU memory at startup.
 
 This benchmark shows the performance benefits of kvcached when serving three `Llama-3.1-8B` models on an A100-80G GPU under workloads with intermittent peaks. kvcached can achieve **2-28x TTFT reduction** compared to the current serving engines. This performance gain can be converted to **significant cost savings** for LLM serving. Without kvcached, the systems have to provision more GPUs to achieve the same performance.
-Details can be found in [benchmarks/bench_latency_benefit](./benchmarks/bench_latency_benefit).
+Details can be found in [benchmarks/bench_latency_benefit](https://github.com/ovg-project/kvcached/tree/main/benchmarks/bench_latency_benefit).
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/ovg-project/kvcached/refs/heads/main/assets/ttft_results/ttft_mean.svg" alt="TTFT mean" width="49%" />
@@ -129,7 +141,7 @@ For developmenet, we prepare an all-in-one docker:
 docker pull ghcr.io/ovg-project/kvcached-dev:latest
 ```
 
-More instructions can be found [here](./docker/README.md). GB200 dockers are on the way.
+More instructions can be found [here](https://github.com/ovg-project/kvcached/blob/main/docker/README.md). GB200 dockers are on the way.
 
 ## Testing
 
