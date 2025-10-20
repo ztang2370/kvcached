@@ -7,7 +7,7 @@ Automatically traffic monitor and idled models sleep.
 ```bash
 # 1. Start controller
 cd /kvcached
-source engine_integration/vllm-v0.9.2/.venv/bin/activate
+source ${VENV_PATH}/bin/activate
 cd controller
 python launch.py --config example-config.yaml
 ```

@@ -30,7 +30,7 @@ bash start_multi_agent_models.sh \
     --writing-model Qwen/Qwen3-4B \
     --research-engine vllm \
     --writing-engine vllm \
-    --venv-vllm-path ../../engine_integration/vllm-v0.9.2/.venv
+    --venv-vllm-path ${VENV_PATH}
 ```
 
 ### 3. Run Multi-Agent Examples with LangChain
