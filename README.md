@@ -22,7 +22,7 @@
   <img src="https://raw.githubusercontent.com/ovg-project/kvcached/refs/heads/main/assets/ads.jpg" alt="Make GPU Sharing Flexible and Easy" width="500" />
 </p>
 
-kvcached is a KV cache library for LLM serving/training on **shared GPUs**.  By bringing OS-style **virtual memory** abstraction to LLM systems, it enables **elastic and demand-driven** KV cache allocation, improving GPU utilization under dynamic workloads.
+kvcached (KV cache daemon) is a KV cache library for LLM serving/training on **shared GPUs**.  By bringing OS-style **virtual memory** abstraction to LLM systems, it enables **elastic and demand-driven** KV cache allocation, improving GPU utilization under dynamic workloads.
 
 kvcached achieves this by decoupling GPU virtual addressing from physical memory allocation for KV caches. It allows serving engines to initially reserve virtual memory only and later back it with physical GPU memory when the cache is actively used. This decoupling enables on-demand allocation and flexible sharing, bringing better GPU memory utilization under dynamic and mixed workloads. Check out more details in the [blog](https://yifanqiao.notion.site/Solve-the-GPU-Cost-Crisis-with-kvcached-289da9d1f4d68034b17bf2774201b141).
 
@@ -124,18 +124,16 @@ pip install -e . --no-build-isolation --no-cache-dir
 python tools/dev_copy_pth.py
 ```
 
-## Run kvcached with Docker
+### Using Docker
 
-You can test or develop kvcached with Docker.
-
-To test kvcached with original engine dockers.
+kvcached installed with original engine dockers.
 
 ```bash
 docker pull ghcr.io/ovg-project/kvcached-sglang:latest   # kvcached-v0.1.1-sglang-v0.5.3
 docker pull ghcr.io/ovg-project/kvcached-vllm:latest     # kvcached-v0.1.1-vllm-v0.11.0
 ```
 
-For developmenet, we prepare an all-in-one docker:
+We prepare an all-in-one docker for developers:
 
 ```bash
 docker pull ghcr.io/ovg-project/kvcached-dev:latest
