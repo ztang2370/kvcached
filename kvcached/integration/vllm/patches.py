@@ -5,11 +5,24 @@
 vLLM-specific patches using unified patch infrastructure.
 """
 
+from __future__ import annotations
+
 import types
-from typing import Any, Iterable, Optional
+from typing import TYPE_CHECKING, Any, Iterable, Optional
 
 from kvcached.integration.patch_base import BasePatch, enable_kvcached
 from kvcached.integration.version_utils import VersionAwarePatch, VersionRange, version_range
+
+if TYPE_CHECKING:
+    # These types are imported from vLLM at runtime via getattr()
+    # Import them here for type checking only
+    try:
+        from vllm.v1.core.block_pool import KVCacheBlock  # type: ignore[import-untyped]
+        from vllm.v1.core.block_pool import KVCacheEvent  # type: ignore[import-untyped]
+    except ImportError:
+        # Fallback if vLLM is not available during type checking
+        KVCacheBlock = Any  # type: ignore[misc,assignment]
+        KVCacheEvent = Any  # type: ignore[misc,assignment]
 
 # Version ranges for vLLM support
 VLLM_V8_RANGE = ">=0.8.4,<0.9.0"  # vLLM 0.8.x versions, need to cover 0.8.5.post1
@@ -35,14 +48,21 @@ class ElasticBlockPoolPatch(VersionAwarePatch, BasePatch):
         return self.inject_elastic_block_pool(block_pool_mod)
 
     @version_range(VLLM_ALL_RANGE)
-    def inject_elastic_block_pool(self, block_pool_mod: types.ModuleType) -> bool:
+    def inject_elastic_block_pool(self,
+                                  block_pool_mod: types.ModuleType) -> bool:
         """Inject ElasticBlockPool"""
         if hasattr(block_pool_mod, "ElasticBlockPool"):
             self.logger.debug("ElasticBlockPool already exists")
             return True
 
         BlockPool = getattr(block_pool_mod, "BlockPool")
-        KVCacheBlock = getattr(block_pool_mod, "KVCacheBlock")
+        KVCacheBlockClass = getattr(block_pool_mod, "KVCacheBlock")
+
+        logger = self.logger  # Capture logger in closure
+
+        _PREFIX_CACHE_WARNING_MSG = (
+            "kvcached does not support prefix cache yet, "
+            "double check vLLM is not launched with prefix cache enabled.")
 
         class ElasticBlockPool(BlockPool):  # type: ignore
             """ElasticBlockPool that manages KVCacheBlocks using kvcached."""
@@ -59,8 +79,7 @@ class ElasticBlockPoolPatch(VersionAwarePatch, BasePatch):
                 assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
                 assert not enable_caching, "Caching is not supported in ElasticBlockPool"
                 assert not enable_kv_cache_events, (
-                    "KV cache events are not supported in ElasticBlockPool"
-                )
+                    "KV cache events are not supported in ElasticBlockPool")
 
                 self.num_gpu_blocks = num_gpu_blocks
                 self.enable_kv_cache_events = enable_kv_cache_events
@@ -69,35 +88,41 @@ class ElasticBlockPoolPatch(VersionAwarePatch, BasePatch):
                 from kvcached.integration.vllm.interfaces import get_kv_cache_manager
 
                 self.kv_cache_manager = get_kv_cache_manager(
-                    num_gpu_blocks, block_size, cell_size, num_layers
-                )
+                    num_gpu_blocks, block_size, cell_size, num_layers)
 
                 self.null_block = None  # type: ignore
 
-            def get_cached_block(self, *args: Any, **kwargs: Any) -> Optional[list[KVCacheBlock]]:  # type: ignore[valid-type]
+            def get_cached_block(
+                self, *args: Any, **kwargs: Any
+            ) -> Optional[list["KVCacheBlock"]]:
                 """args and kwargs are ignored for compatibility"""
                 return None
 
             def cache_full_blocks(self, *args: Any, **kwargs: Any) -> None:
                 """args and kwargs are ignored for compatibility"""
-                raise NotImplementedError("Caching is not supported in ElasticBlockPool")
+                logger.warning(_PREFIX_CACHE_WARNING_MSG)
+                return
 
-            def get_new_blocks(self, num_blocks: int) -> list[KVCacheBlock]:  # type: ignore[valid-type]
+            def get_new_blocks(
+                self, num_blocks: int
+            ) -> list["KVCacheBlock"]:
                 if num_blocks > self.get_num_free_blocks():
-                    raise ValueError(f"Cannot get {num_blocks} free blocks from the pool")
+                    raise ValueError(
+                        f"Cannot get {num_blocks} free blocks from the pool")
 
                 block_ids = self.kv_cache_manager.alloc(num_blocks)
                 assert block_ids is not None and len(block_ids) == num_blocks
 
-                return [KVCacheBlock(bid) for bid in block_ids]
+                return [KVCacheBlockClass(bid) for bid in block_ids]
 
-            def touch(self, *args, **kwargs) -> None:  # type: ignore[valid-type]
-                raise NotImplementedError("Not supported in ElasticBlockPool")
+            def touch(self, *args, **kwargs) -> None:
+                logger.warning(_PREFIX_CACHE_WARNING_MSG)
+                return
 
             def free_blocks(
                 self,
-                ordered_blocks: Iterable[KVCacheBlock],  # type: ignore[valid-type]
-            ) -> None:  # type: ignore[valid-type]
+                ordered_blocks: Iterable["KVCacheBlock"],
+            ) -> None:
                 block_ids = [
                     block.block_id  # type: ignore[attr-defined]
                     for block in ordered_blocks
@@ -106,7 +131,8 @@ class ElasticBlockPoolPatch(VersionAwarePatch, BasePatch):
                     self.kv_cache_manager.free(block_ids)
 
             def reset_prefix_cache(self) -> bool:
-                raise NotImplementedError("Not supported in ElasticBlockPool")
+                logger.warning(_PREFIX_CACHE_WARNING_MSG)
+                return True
 
             def get_num_free_blocks(self) -> int:
                 return self.kv_cache_manager.available_size()
@@ -116,7 +142,7 @@ class ElasticBlockPoolPatch(VersionAwarePatch, BasePatch):
 
             def take_events(
                 self,
-            ) -> list["KVCacheEvent"]:  # type: ignore[name-defined] # noqa: F821
+            ) -> list["KVCacheEvent"]:
                 return []
 
         setattr(block_pool_mod, "ElasticBlockPool", ElasticBlockPool)
@@ -282,10 +308,10 @@ class KVCacheManagerPatch(VersionAwarePatch, BasePatch):
         return self.patch_kvcache_manager(kvcache_manager_mod)
 
     @version_range(VLLM_V8_RANGE)
-    def patch_kvcache_manager(self,
-                              kvcache_manager_mod: types.ModuleType) -> bool:
+    def patch_kvcache_manager(self, kvcache_manager_mod: types.ModuleType) -> bool:
         """Patch KVCacheManager"""
         import inspect
+
         KVCacheManager = self._get_target_class(kvcache_manager_mod)
         if KVCacheManager is None:
             return False
@@ -307,7 +333,7 @@ class KVCacheManagerPatch(VersionAwarePatch, BasePatch):
             try:
                 bound_args = sig.bind(self, *args, **kwargs)
                 bound_args.apply_defaults()
-                kv_cache_config = bound_args.arguments.get('kv_cache_config')
+                kv_cache_config = bound_args.arguments.get("kv_cache_config")
                 if kv_cache_config is None:
                     raise ValueError("kv_cache_config is required")
 
@@ -330,11 +356,9 @@ class KVCacheManagerPatch(VersionAwarePatch, BasePatch):
             # Get required attributes from the manager instance
             # This is a bit hacky but simplest
             if hasattr(self, "get_kv_cache_spec"):
-                kv_cache_spec = getattr(self,
-                                        "get_kv_cache_spec")().items()[0][1]
+                kv_cache_spec = getattr(self, "get_kv_cache_spec")().items()[0][1]
             elif hasattr(self, "specialized_manager"):
-                kv_cache_spec = getattr(self,
-                                        "specialized_manager").kv_cache_spec
+                kv_cache_spec = getattr(self, "specialized_manager").kv_cache_spec
             else:
                 raise ValueError(
                     "Unable to determine kv_cache_spec: expected get_kv_cache_spec or specialized_manager"
