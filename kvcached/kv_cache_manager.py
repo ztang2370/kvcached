@@ -116,19 +116,11 @@ class KVCacheManager:
                 if total_wait >= KV_TENSOR_WAIT_TIMEOUT:
                     raise TimeoutError("KV tensors not created after "
                                        f"{KV_TENSOR_WAIT_TIMEOUT} seconds")
-
                 time.sleep(0.001)  # 1ms
                 total_wait += 0.001
-
-            # Reserve the first block as null block for padding tokens
-            if self.reserve_null_block:
-                # Skip the wait to avoid dead-lock with the event.
-                self.null_block = self._alloc(1, _skip_wait=True)
-                if self.null_block != [0]:
-                    logger.error(
-                        f"Failed to reserve null block, got {self.null_block}")
-                    raise RuntimeError(
-                        "Failed to reserve null block at index 0")
+            # KV tensors created now
+            # Possibly reserve the first block as null block for padding tokens
+            self._reserve_null_block()
 
             self.page_allocator.start_prealloc_thread()
         except Exception as e:
@@ -142,6 +134,19 @@ class KVCacheManager:
     def _wait_post_init(self):
         if not self._post_init_done.is_set():
             self._post_init_done.wait()
+
+    def _reserve_null_block(self) -> None:
+        """
+        Reserve the first block as null block for padding tokens.
+        """
+        if self.reserve_null_block:
+            self.null_block = self._alloc(1, _skip_wait=True)
+            if self.null_block != [0]:
+                logger.error(f"Failed to reserve null block, got {self.null_block}")
+                raise RuntimeError("Failed to reserve null block at index 0")
+        else:
+            self.null_block = None
+
 
     def alloc(self, need_size: int) -> Optional[List[int]]:
         return self._alloc(need_size)
@@ -273,7 +278,7 @@ class KVCacheManager:
     def free_reserved(self):
         if self.reserved_blocks:
             self.free(self.reserved_blocks)
-            self.reserved_blocks = []
+            self.reserved_blocks.clear()
 
     @synchronized
     def resize(self, new_mem_size: int):
@@ -299,7 +304,10 @@ class KVCacheManager:
         return False
 
     @synchronized
-    def trim(self):
+    def trim(self) -> None:
+        """
+        Trim the reserved pages to free up physical memory.
+        """
         self._wait_post_init()
         self.page_allocator.trim()
 
@@ -334,8 +342,37 @@ class KVCacheManager:
         else:
             raise ValueError(f"Unknown unit: {unit}")
 
+    @synchronized
     def clear(self):
-        raise NotImplementedError("kvcached does not support clear() for now")
+        """
+        Free all allocated blocks and reset the allocator to initial state.
+        """
+
+        self._wait_post_init()
+
+        # Clear reserved blocks
+        self.free_reserved()
+
+        # Free all blocks from avail_pages and full_pages
+        pages_to_free: List[int] = []
+        for page in self.avail_pages.values():
+            pages_to_free.append(page.page_id)
+        for page in self.full_pages.values():
+            pages_to_free.append(page.page_id)
+        if pages_to_free:
+            self.page_allocator.free_pages(pages_to_free)
+        self.avail_pages.clear()
+        self.full_pages.clear()
+
+        # Trim the page allocator to free up reserved pages
+        self.trim()
+
+        self.target_num_blocks = None
+        self.in_shrink = False
+        self.num_avail_blocks = 0
+
+        # Possibly reserve the first block as null block for padding tokens
+        self._reserve_null_block()
 
     # Private methods
     @synchronized
