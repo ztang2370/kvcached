@@ -10,12 +10,10 @@ from kvcached.integration.patch_base import PatchManager, log_patch_results
 from kvcached.integration.vllm.patches import (
     VLLM_ALL_RANGE,
     VLLM_V8_RANGE,
-    VLLM_V9_PLUS_RANGE,
     ElasticBlockPoolPatch,
     EngineCorePatch,
     GPUModelRunnerPatch,
     GPUWorkerPatch,
-    KVCacheCoordinatorPatch,
     KVCacheManagerPatch,
 )
 from kvcached.utils import get_kvcached_logger
@@ -42,7 +40,7 @@ def _patch_vllm(_vllm: types.ModuleType) -> None:
             (EngineCorePatch(), VLLM_ALL_RANGE),
             (GPUModelRunnerPatch(), VLLM_ALL_RANGE),
             (GPUWorkerPatch(), VLLM_ALL_RANGE),
-            (KVCacheCoordinatorPatch(), VLLM_V9_PLUS_RANGE),
+            # (KVCacheCoordinatorPatch(), VLLM_V9_PLUS_RANGE),
             (KVCacheManagerPatch(), VLLM_V8_RANGE),
         ]
     )

@@ -246,8 +246,6 @@ class KVCacheCoordinatorPatch(VersionAwarePatch, BasePatch):
 
             kv_cache_config = getattr(self, "kv_cache_config")
             kv_groups = kv_cache_config.kv_cache_groups
-            if len(kv_groups) != 1:
-                raise ValueError("Only one kv cache group is supported for kvcached")
 
             kv_cache_group = kv_groups[0]
             kv_cache_spec = kv_cache_group.kv_cache_spec
@@ -625,7 +623,6 @@ class GPUModelRunnerPatch(VersionAwarePatch, BasePatch):
                 kv_cache_spec.head_size,
             )
 
-            # num_layers = len(kv_cache_group.layer_names)
             dtype = kv_cache_spec.dtype
 
             kv_cache_raw_tensors = kvi.alloc_kv_cache(
@@ -633,7 +630,7 @@ class GPUModelRunnerPatch(VersionAwarePatch, BasePatch):
                 kv_cache_spec.block_size,
                 dtype,
                 getattr(self, "device", torch.device("cuda")).type,
-                total_layers,  # Allocate for all layers across all groups
+                total_layers,
                 attention_type="MHA",
                 kv_layout="NHD",
             )
