@@ -177,6 +177,7 @@ class EngineCorePatch(VersionAwarePatch, BasePatch):
             return True
 
         original_init = EngineCore.__init__
+        logger = self.logger  # Capture logger in closure
 
         def _patched_engine_init(self, vllm_config, *args: Any, **kwargs: Any):
             if enable_kvcached():
@@ -190,6 +191,22 @@ class EngineCorePatch(VersionAwarePatch, BasePatch):
                     )
                 except Exception:
                     pass
+
+                # kvcached uses a single ElasticBlockPool backed by one
+                # contiguous FTensor for all layers.  The hybrid KV cache
+                # manager creates per-group pools with different block
+                # counts, which is incompatible.  Force uniform KV cache
+                # allocation so that all layers share one pool.
+                sched_cfg = getattr(vllm_config, "scheduler_config", None)
+                if sched_cfg is not None and not getattr(
+                    sched_cfg, "disable_hybrid_kv_cache_manager", False
+                ):
+                    sched_cfg.disable_hybrid_kv_cache_manager = True
+                    logger.info(
+                        "Automatically disabled hybrid KV cache manager "
+                        "for kvcached compatibility."
+                    )
+
             return original_init(self, vllm_config, *args, **kwargs)
 
         self._mark_as_patched(_patched_engine_init, "init")
@@ -269,7 +286,17 @@ class KVCacheCoordinatorPatch(VersionAwarePatch, BasePatch):
             block_pool_mod = importlib.import_module("vllm.v1.core.block_pool")
             ElasticBlockPool = getattr(block_pool_mod, "ElasticBlockPool")
 
-            num_layers = len(getattr(kv_cache_config, "kv_cache_tensors"))
+            # Count total layers across all KV cache groups.
+            # This must match the total_layers used in
+            # _allocate_kv_cache_from_kvcached so that the contiguous
+            # layout compound page sizes are consistent.
+            # NOTE: With the hybrid KV cache manager automatically
+            # disabled by EngineCorePatch, there is normally only one
+            # group here, so this equals the total layer count.
+            num_layers = sum(
+                len(g.layer_names) for g in kv_cache_config.kv_cache_groups
+            )
+
             self.block_pool = ElasticBlockPool(
                 kv_cache_config.num_blocks,
                 block_size,
@@ -576,16 +603,16 @@ class GPUModelRunnerPatch(VersionAwarePatch, BasePatch):
 
             from kvcached.integration.vllm import interfaces as kvi
 
-            for kv_cache_group in kv_cache_config.kv_cache_groups:
-                kv_cache_spec = kv_cache_group.kv_cache_spec
-                if not isinstance(kv_cache_spec, (FullAttentionSpec, SlidingWindowSpec)):
+            for grp in kv_cache_config.kv_cache_groups:
+                grp_spec = grp.kv_cache_spec
+                if not isinstance(grp_spec, (FullAttentionSpec, SlidingWindowSpec)):
                     raise ValueError(
                         f"kvcached only supports FullAttentionSpec and SlidingWindowSpec layers, "
-                        f"got {type(kv_cache_spec).__name__}"
+                        f"got {type(grp_spec).__name__}"
                     )
 
-            kv_cache_group = kv_cache_config.kv_cache_groups[0]
-            kv_cache_spec = kv_cache_group.kv_cache_spec
+            first_kv_cache_group = kv_cache_config.kv_cache_groups[0]
+            kv_cache_spec = first_kv_cache_group.kv_cache_spec
 
             layer_to_tensor_cfg: dict[str, KVCacheTensor] = {}
             for tensor_cfg in kv_cache_config.kv_cache_tensors:
@@ -593,11 +620,11 @@ class GPUModelRunnerPatch(VersionAwarePatch, BasePatch):
                     layer_to_tensor_cfg[ln] = tensor_cfg
 
             total_layers = 0
-            for kv_cache_group in kv_cache_config.kv_cache_groups:
-                for layer_name in kv_cache_group.layer_names:
+            for grp in kv_cache_config.kv_cache_groups:
+                for layer_name in grp.layer_names:
                     total_layers += 1
                     # For validation, check against each layer's actual spec
-                    layer_spec = kv_cache_group.kv_cache_spec
+                    layer_spec = grp.kv_cache_spec
                     tensor_cfg = layer_to_tensor_cfg[layer_name]
                     assert tensor_cfg.size % layer_spec.page_size_bytes == 0, (
                         f"Tensor size for layer {layer_name} ({tensor_cfg.size}) "
@@ -610,7 +637,7 @@ class GPUModelRunnerPatch(VersionAwarePatch, BasePatch):
                         "kv_cache_config.num_blocks"
                     )
 
-            first_layer_name = kv_cache_group.layer_names[0]
+            first_layer_name = first_kv_cache_group.layer_names[0]
             rep_tensor_cfg = layer_to_tensor_cfg[first_layer_name]
             num_blocks = rep_tensor_cfg.size // kv_cache_spec.page_size_bytes
 
