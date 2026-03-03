@@ -126,6 +126,7 @@ class ElasticBlockPoolPatch(VersionAwarePatch, BasePatch):
                 block_ids = [
                     block.block_id  # type: ignore[attr-defined]
                     for block in ordered_blocks
+                    if block is not None
                 ]
                 if len(block_ids) > 0:
                     self.kv_cache_manager.free(block_ids)
@@ -177,7 +178,6 @@ class EngineCorePatch(VersionAwarePatch, BasePatch):
             return True
 
         original_init = EngineCore.__init__
-        logger = self.logger  # Capture logger in closure
 
         def _patched_engine_init(self, vllm_config, *args: Any, **kwargs: Any):
             if enable_kvcached():
@@ -191,21 +191,6 @@ class EngineCorePatch(VersionAwarePatch, BasePatch):
                     )
                 except Exception:
                     pass
-
-                # kvcached uses a single ElasticBlockPool backed by one
-                # contiguous FTensor for all layers.  The hybrid KV cache
-                # manager creates per-group pools with different block
-                # counts, which is incompatible.  Force uniform KV cache
-                # allocation so that all layers share one pool.
-                sched_cfg = getattr(vllm_config, "scheduler_config", None)
-                if sched_cfg is not None and not getattr(
-                    sched_cfg, "disable_hybrid_kv_cache_manager", False
-                ):
-                    sched_cfg.disable_hybrid_kv_cache_manager = True
-                    logger.info(
-                        "Automatically disabled hybrid KV cache manager "
-                        "for kvcached compatibility."
-                    )
 
             return original_init(self, vllm_config, *args, **kwargs)
 
@@ -264,10 +249,26 @@ class KVCacheCoordinatorPatch(VersionAwarePatch, BasePatch):
             kv_cache_config = getattr(self, "kv_cache_config")
             kv_groups = kv_cache_config.kv_cache_groups
 
+            # Use the first group's spec as representative.  For hybrid
+            # models (multiple groups), all groups share one block pool
+            # in vLLM's design — validate that the KV cache geometry
+            # is compatible across groups.
             kv_cache_group = kv_groups[0]
             kv_cache_spec = kv_cache_group.kv_cache_spec
             block_size = kv_cache_spec.block_size
             cell_size = kv_cache_spec.page_size_bytes // block_size // 2
+
+            for grp in kv_groups[1:]:
+                grp_spec = grp.kv_cache_spec
+                grp_block_size = grp_spec.block_size
+                grp_cell_size = grp_spec.page_size_bytes // grp_block_size // 2
+                if grp_block_size != block_size or grp_cell_size != cell_size:
+                    raise ValueError(
+                        "kvcached requires all KV cache groups to have the "
+                        f"same block geometry. Group 0: block_size={block_size},"
+                        f" cell_size={cell_size}; another group: "
+                        f"block_size={grp_block_size}, cell_size={grp_cell_size}"
+                    )
 
             try:
                 from vllm.distributed.parallel_state import get_tensor_model_parallel_world_size
@@ -290,9 +291,6 @@ class KVCacheCoordinatorPatch(VersionAwarePatch, BasePatch):
             # This must match the total_layers used in
             # _allocate_kv_cache_from_kvcached so that the contiguous
             # layout compound page sizes are consistent.
-            # NOTE: With the hybrid KV cache manager automatically
-            # disabled by EngineCorePatch, there is normally only one
-            # group here, so this equals the total layer count.
             num_layers = sum(
                 len(g.layer_names) for g in kv_cache_config.kv_cache_groups
             )
