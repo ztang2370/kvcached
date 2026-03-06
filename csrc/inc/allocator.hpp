@@ -25,6 +25,9 @@ public:
   ~FTensorAllocator();
 
   // KV cache interfaces.
+  // Each FTensorAllocator instance manages one independent KV cache pool.
+  // For hybrid attention models, use separate allocators via
+  // global_allocator(group_id).
   std::vector<torch::Tensor> create_kv_tensors(size_t size, torch::Dtype dtype,
                                                const std::string &dev_str,
                                                int64_t num_layers,
@@ -34,10 +37,13 @@ public:
   bool unmap_from_kv_tensors(const std::vector<offset_t> &offsets);
 
   // Global status interfaces.
+  // init() creates the default allocator (group_id=0).
+  // global_allocator(group_id) returns the allocator for the given group,
+  // lazily creating one if it doesn't exist yet.
   static void init(const std::string &dev_str, size_t page_size = 0,
                    bool contiguous_layout = false);
   static void shutdown();
-  static FTensorAllocator *global_allocator();
+  static FTensorAllocator *global_allocator(int64_t group_id = 0);
   void destroy();
 
 private:
@@ -59,16 +65,22 @@ private:
   // CUDA util functions.
   void init_cuda_();
 
-  static std::unique_ptr<FTensorAllocator> g_allocator_;
+  // Multiton: one allocator per group_id.
+  static std::unordered_map<int64_t, std::unique_ptr<FTensorAllocator>>
+      g_allocators_;
   static std::mutex g_allocator_mutex_;
+  // Device and layout from init(), used to create new group allocators.
+  static torch::Device g_device_;
+  static bool g_contiguous_layout_;
 
   torch::Device dev_;
-
-  int64_t num_layers_;
   bool contiguous_layout_;
-  size_t kv_tensor_size_per_layer_;
 
   mutable std::mutex mtx_;
+
+  // Per-allocator KV cache state (formerly inside KVGroup).
+  int64_t num_layers_ = 0;
+  size_t kv_tensor_size_per_layer_ = 0;
   // For per-layer layout: one tensor per layer
   std::unordered_map<std::string, std::unique_ptr<FTensor>> ftensors_;
   // For contiguous layout: single tensor containing all layers
