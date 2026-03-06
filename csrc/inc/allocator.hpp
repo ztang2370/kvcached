@@ -25,9 +25,6 @@ public:
   ~FTensorAllocator();
 
   // KV cache interfaces.
-  // Each FTensorAllocator instance manages one independent KV cache pool.
-  // For hybrid attention models, use separate allocators via
-  // global_allocator(group_id).
   std::vector<torch::Tensor> create_kv_tensors(size_t size, torch::Dtype dtype,
                                                const std::string &dev_str,
                                                int64_t num_layers,
@@ -74,13 +71,13 @@ private:
   static bool g_contiguous_layout_;
 
   torch::Device dev_;
+
+  int64_t num_layers_;
   bool contiguous_layout_;
+  size_t kv_tensor_size_per_layer_;
 
   mutable std::mutex mtx_;
 
-  // Per-allocator KV cache state (formerly inside KVGroup).
-  int64_t num_layers_ = 0;
-  size_t kv_tensor_size_per_layer_ = 0;
   // For per-layer layout: one tensor per layer
   std::unordered_map<std::string, std::unique_ptr<FTensor>> ftensors_;
   // For contiguous layout: single tensor containing all layers

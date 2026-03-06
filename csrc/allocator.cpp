@@ -45,7 +45,8 @@ static inline size_t get_v_base_offset(const torch::Tensor &tensor) {
 
 FTensorAllocator::FTensorAllocator(const torch::Device &device,
                                    bool contiguous_layout)
-    : dev_(device), contiguous_layout_(contiguous_layout) {
+    : dev_(device), num_layers_(0), contiguous_layout_(contiguous_layout),
+      kv_tensor_size_per_layer_(0) {
   if (dev_.is_cuda()) {
     init_cuda_();
   }
@@ -58,8 +59,6 @@ void FTensorAllocator::destroy() {
   ftensors_.clear();
   contiguous_kv_tensor_.reset();
   zero_page_.reset();
-  num_layers_ = 0;
-  kv_tensor_size_per_layer_ = 0;
 }
 
 void FTensorAllocator::init(const std::string &dev_str, size_t page_size,
@@ -116,7 +115,6 @@ std::vector<torch::Tensor> FTensorAllocator::create_kv_tensors(
 
   assert(num_layers_ == 0 || num_layers_ == num_layers);
   num_layers_ = num_layers;
-
   // Ensure size is aligned to page size.
   size_t aligned_size = size;
   if (size % kPageSize != 0) {
@@ -132,12 +130,14 @@ std::vector<torch::Tensor> FTensorAllocator::create_kv_tensors(
     // 1 for MLA (combined KV).
     size_t compound_page_size = kPageSize * num_layers * num_kv_buffers;
     zero_page_ = make_shared_page(dev_, ZERO_PAGE_ID, compound_page_size);
+    // We can use the aligned size directly for contiguous layout too because
+    // both compound_page_size and aligned_size are already/will be multiplied
+    // by num_layers.
     return create_kv_tensors_contiguous_(aligned_size, dtype, dev_str,
                                          num_layers, compound_page_size);
   } else {
     zero_page_ = make_shared_page(dev_, ZERO_PAGE_ID);
-    auto prefix = std::string(kv_prefix);
-    return create_kv_tensors_per_layer_(prefix, aligned_size, dtype, dev_str,
+    return create_kv_tensors_per_layer_(kv_prefix, aligned_size, dtype, dev_str,
                                         num_layers);
   }
 }
@@ -165,7 +165,7 @@ bool FTensorAllocator::map_to_kv_tensors(const std::vector<offset_t> &offsets) {
       ftensor->map(offset);
     }
   } else {
-    // Per-layer mapping
+    // Original Per-layer mapping
     for (int64_t i = 0; i < num_layers_; i++) {
       auto kv_name = std::string(kv_prefix) + std::to_string(i);
       auto ftensor = ftensors_[kv_name].get();
@@ -205,7 +205,7 @@ bool FTensorAllocator::unmap_from_kv_tensors(
       ftensor->unmap(offset);
     }
   } else {
-    // Per-layer unmapping
+    // Original Per-layer unmapping
     for (int64_t i = 0; i < num_layers_; i++) {
       auto kv_name = std::string(kv_prefix) + std::to_string(i);
       auto ftensor = ftensors_[kv_name].get();
