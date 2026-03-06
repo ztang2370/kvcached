@@ -165,7 +165,7 @@ bool FTensorAllocator::map_to_kv_tensors(const std::vector<offset_t> &offsets) {
       ftensor->map(offset);
     }
   } else {
-    // Original Per-layer mapping
+    // Original per-layer mapping
     for (int64_t i = 0; i < num_layers_; i++) {
       auto kv_name = std::string(kv_prefix) + std::to_string(i);
       auto ftensor = ftensors_[kv_name].get();
@@ -205,7 +205,7 @@ bool FTensorAllocator::unmap_from_kv_tensors(
       ftensor->unmap(offset);
     }
   } else {
-    // Original Per-layer unmapping
+    // Original per-layer unmapping
     for (int64_t i = 0; i < num_layers_; i++) {
       auto kv_name = std::string(kv_prefix) + std::to_string(i);
       auto ftensor = ftensors_[kv_name].get();

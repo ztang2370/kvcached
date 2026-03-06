@@ -77,7 +77,6 @@ private:
   size_t kv_tensor_size_per_layer_;
 
   mutable std::mutex mtx_;
-
   // For per-layer layout: one tensor per layer
   std::unordered_map<std::string, std::unique_ptr<FTensor>> ftensors_;
   // For contiguous layout: single tensor containing all layers
