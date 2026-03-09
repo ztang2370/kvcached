@@ -562,24 +562,15 @@ class GPUModelRunnerPatch(VersionAwarePatch, BasePatch):
                 kv_cache_spec.head_size,
             )
 
-            if is_mla:
-                kv_cache_buffers = kvi.alloc_mla_kv_cache(
-                    kv_cache_shape,
-                    kv_cache_spec.block_size,
-                    dtype,
-                    self.device.type,
-                    num_layers,
-                )
-            else:
-                kv_cache_buffers = kvi.alloc_kv_cache(
-                    kv_cache_shape,
-                    kv_cache_spec.block_size,
-                    dtype,
-                    self.device.type,
-                    num_layers,
-                    attention_type="MHA",
-                    kv_layout="NHD",
-                )
+            kv_cache_buffers = kvi.alloc_kv_cache(
+                kv_cache_shape,
+                kv_cache_spec.block_size,
+                dtype,
+                self.device.type,
+                num_layers,
+                attention_type="MLA" if is_mla else "MHA",
+                kv_layout="NHD",
+            )
             layer_id = 0
             for kv_cache_group in kv_cache_config.kv_cache_groups:
                 for layer_name in kv_cache_group.layer_names:
@@ -663,24 +654,15 @@ class GPUModelRunnerPatch(VersionAwarePatch, BasePatch):
             dtype = kv_cache_spec.dtype
             device_type = getattr(self, "device", torch.device("cuda")).type
 
-            if is_mla:
-                kv_cache_raw_tensors = kvi.alloc_mla_kv_cache(
-                    kv_cache_shape,
-                    kv_cache_spec.block_size,
-                    dtype,
-                    device_type,
-                    num_layers,
-                )
-            else:
-                kv_cache_raw_tensors = kvi.alloc_kv_cache(
-                    kv_cache_shape,
-                    kv_cache_spec.block_size,
-                    dtype,
-                    device_type,
-                    num_layers,
-                    attention_type="MHA",
-                    kv_layout="NHD",
-                )
+            kv_cache_raw_tensors = kvi.alloc_kv_cache(
+                kv_cache_shape,
+                kv_cache_spec.block_size,
+                dtype,
+                device_type,
+                num_layers,
+                attention_type="MLA" if is_mla else "MHA",
+                kv_layout="NHD",
+            )
             return kv_cache_raw_tensors
 
         setattr(
