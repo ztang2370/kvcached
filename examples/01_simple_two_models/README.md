@@ -18,7 +18,6 @@ export KVCACHED_AUTOPATCH=1
 export VLLM_USE_V1=1
 export VLLM_ATTENTION_BACKEND=FLASH_ATTN
 vllm serve "${MODEL}" \
-  --disable-log-requests \
   --no-enable-prefix-caching \
   --port "${PORT}"
 ```
