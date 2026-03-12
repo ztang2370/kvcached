@@ -184,7 +184,7 @@ python -m sglang.launch_server --model meta-llama/Llama-3.2-1B-Instruct --disabl
 python -m sglang.bench_serving --backend sglang-oai --model meta-llama/Llama-3.2-1B-Instruct --dataset-name sharegpt --request-rate 10 --num-prompts 1000 --port 30000
 
 # for vllm
-vllm serve meta-llama/Llama-3.2-1B-Instruct --disable-log-requests --no-enable-prefix-caching --port=12346
+vllm serve meta-llama/Llama-3.2-1B-Instruct --no-enable-prefix-caching --port=12346
 vllm bench serve --model meta-llama/Llama-3.2-1B-Instruct --request-rate 10 --num-prompts 1000 --port 12346
 ```
 
