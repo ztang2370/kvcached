@@ -84,8 +84,7 @@ for i in "${!MODELS[@]}"; do
 
     echo "Starting benchmark for $MODEL (Model ${MODEL_INDEX}) on port $PORT..."
 
-    NUM_PROMPTS=$((NUM_PROMPTS + (NUM_MODELS - i) * MODEL_DELAY))
-    # Use ramp-up-down strategy
+    MODEL_NUM_PROMPTS=$((NUM_PROMPTS + (NUM_MODELS - i) * MODEL_DELAY * RAMP_END_RPS))
     echo "Using ramp-up-down strategy: ${RAMP_START_RPS} -> ${RAMP_PEAK_RPS} -> ${RAMP_END_RPS} RPS (increment: ±${RAMP_INCREMENT} RPS/sec)"
 
     python bench_kvcached_vllm.py \
@@ -94,7 +93,7 @@ for i in "${!MODELS[@]}"; do
         --dataset-name random \
         --random-input-len "$PROMPT_LEN" \
         --random-output-len "$COMPLETION_LEN" \
-        --num-prompts "$NUM_PROMPTS" \
+        --num-prompts "$MODEL_NUM_PROMPTS" \
         --host "localhost" \
         --port "$PORT" \
         --endpoint "/v1/completions" \
