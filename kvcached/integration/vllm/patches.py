@@ -191,7 +191,6 @@ class EngineCorePatch(VersionAwarePatch, BasePatch):
                     )
                 except Exception:
                     pass
-
             return original_init(self, vllm_config, *args, **kwargs)
 
         self._mark_as_patched(_patched_engine_init, "init")
@@ -249,15 +248,13 @@ class KVCacheCoordinatorPatch(VersionAwarePatch, BasePatch):
             kv_cache_config = getattr(self, "kv_cache_config")
             kv_groups = kv_cache_config.kv_cache_groups
 
-            # Use the first group's spec as representative.  For hybrid
-            # models (multiple groups), all groups share one block pool
-            # in vLLM's design — validate that the KV cache geometry
-            # is compatible across groups.
             kv_cache_group = kv_groups[0]
             kv_cache_spec = kv_cache_group.kv_cache_spec
             block_size = kv_cache_spec.block_size
             cell_size = kv_cache_spec.page_size_bytes // block_size // 2
 
+            # Validate that the KV cache geometry is compatible across groups for hybrid
+            # models (multiple groups).
             for grp in kv_groups[1:]:
                 grp_spec = grp.kv_cache_spec
                 grp_block_size = grp_spec.block_size
@@ -287,10 +284,6 @@ class KVCacheCoordinatorPatch(VersionAwarePatch, BasePatch):
             block_pool_mod = importlib.import_module("vllm.v1.core.block_pool")
             ElasticBlockPool = getattr(block_pool_mod, "ElasticBlockPool")
 
-            # Count total layers across all KV cache groups.
-            # This must match the total_layers used in
-            # _allocate_kv_cache_from_kvcached so that the contiguous
-            # layout compound page sizes are consistent.
             num_layers = sum(
                 len(g.layer_names) for g in kv_cache_config.kv_cache_groups
             )
@@ -617,10 +610,8 @@ class GPUModelRunnerPatch(VersionAwarePatch, BasePatch):
                 for ln in tensor_cfg.shared_by:
                     layer_to_tensor_cfg[ln] = tensor_cfg
 
-            total_layers = 0
             for grp in kv_cache_config.kv_cache_groups:
                 for layer_name in grp.layer_names:
-                    total_layers += 1
                     # For validation, check against each layer's actual spec
                     layer_spec = grp.kv_cache_spec
                     tensor_cfg = layer_to_tensor_cfg[layer_name]
@@ -648,6 +639,7 @@ class GPUModelRunnerPatch(VersionAwarePatch, BasePatch):
                 kv_cache_spec.head_size,
             )
 
+            num_layers = sum(len(g.layer_names) for g in kv_cache_config.kv_cache_groups)
             dtype = kv_cache_spec.dtype
 
             kv_cache_raw_tensors = kvi.alloc_kv_cache(
@@ -655,7 +647,7 @@ class GPUModelRunnerPatch(VersionAwarePatch, BasePatch):
                 kv_cache_spec.block_size,
                 dtype,
                 getattr(self, "device", torch.device("cuda")).type,
-                total_layers,
+                num_layers,
                 attention_type="MHA",
                 kv_layout="NHD",
             )
