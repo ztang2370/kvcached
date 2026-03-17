@@ -100,6 +100,7 @@ def alloc_kv_cache(
                 f"block_size mismatch: kvcache_shape[1]={kvcache_shape[1]} != block_size={block_size}"
             )
         blocks_dim_idx = 0
+        permute_order = list(range(len(kvcache_shape)))
         block_mem_bytes = math.prod(kvcache_shape[1:]) * dtype.itemsize
     else:
         # MHA/GQA shape with K/V dimension
@@ -146,32 +147,19 @@ def alloc_kv_cache(
     actual_kvcache_shape[blocks_dim_idx] = num_blocks_per_layer
 
     # --- Reshape raw tensors into per-layer KV cache views ---
-    if is_mla:
-        kv_tensors: List[torch.Tensor] = []
-        if not _contiguous_layout:
-            num_eles = math.prod(actual_kvcache_shape)
-            for t in raw_kv_tensors:
-                kv_tensors.append(t.view(dtype=dtype)[:num_eles].view(actual_kvcache_shape))
-        else:
-            contiguous_shape = (num_blocks_per_layer, num_layers, *actual_kvcache_shape[1:])
-            num_eles = math.prod(contiguous_shape)
-            contiguous_tensor = raw_kv_tensors[0].view(dtype=dtype)[:num_eles].view(contiguous_shape)
-            for i in range(num_layers):
-                kv_tensors.append(contiguous_tensor[:, i, :, :])
+    if not _contiguous_layout:
+        num_eles = math.prod(actual_kvcache_shape)
+        kv_tensors: List[torch.Tensor] = [
+            t.view(dtype=dtype)[:num_eles].view(actual_kvcache_shape) for t in raw_kv_tensors
+        ]
     else:
-        if not _contiguous_layout:
-            num_eles = math.prod(actual_kvcache_shape)
-            kv_tensors = [
-                t.view(dtype=dtype)[:num_eles].view(tuple(actual_kvcache_shape)) for t in raw_kv_tensors
-            ]
-        else:
-            contiguous_shape = (num_blocks_per_layer, num_layers, num_k_or_v, *actual_kvcache_shape[2:])
-            num_eles = math.prod(contiguous_shape)
-            contiguous_tensor = raw_kv_tensors[0].view(dtype=dtype)[:num_eles].view(contiguous_shape)
-            kv_tensors = [
-                contiguous_tensor[:, i, :, :, :].permute(*permute_order)
-                for i in range(num_layers)
-            ]
+        layer_elem_shape = actual_kvcache_shape[:blocks_dim_idx] + actual_kvcache_shape[blocks_dim_idx + 1:]
+        contiguous_shape = [num_blocks_per_layer, num_layers] + layer_elem_shape
+        num_eles = math.prod(contiguous_shape)
+        contiguous_tensor = raw_kv_tensors[0].view(dtype=dtype)[:num_eles].view(contiguous_shape)
+        kv_tensors = [
+            contiguous_tensor[:, i].permute(*permute_order) for i in range(num_layers)
+        ]
 
     return kv_tensors
 

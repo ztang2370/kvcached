@@ -32,6 +32,27 @@ VLLM_V10_RANGE = ">0.9.2"  # vLLM 0.10.x+ versions, need to cover 0.10.0rc1
 VLLM_ALL_RANGE = ">=0.8.4"  # All supported versions
 
 
+def _get_kv_cache_params(kv_cache_spec: Any, block_size: int) -> tuple:
+    """Determine cell_size and num_kv_buffers from a KV cache spec.
+
+    Returns:
+        (cell_size, num_kv_buffers)
+    """
+    from vllm.v1.kv_cache_interface import MLAAttentionSpec
+
+    if isinstance(kv_cache_spec, MLAAttentionSpec):
+        # MLA: single combined KV buffer per layer
+        # page_size_bytes = block_size * num_kv_heads * head_size * dtype_size
+        cell_size = kv_cache_spec.page_size_bytes // block_size
+        num_kv_buffers = 1
+    else:
+        # MHA/GQA: separate K and V buffers
+        # page_size_bytes = 2 * block_size * num_kv_heads * head_size * dtype_size
+        cell_size = kv_cache_spec.page_size_bytes // block_size // 2
+        num_kv_buffers = 2
+    return cell_size, num_kv_buffers
+
+
 class ElasticBlockPoolPatch(VersionAwarePatch, BasePatch):
     """Inject ElasticBlockPool into vLLM's block pool module"""
 
@@ -255,18 +276,7 @@ class KVCacheCoordinatorPatch(VersionAwarePatch, BasePatch):
             kv_cache_spec = kv_cache_group.kv_cache_spec
             block_size = kv_cache_spec.block_size
 
-            from vllm.v1.kv_cache_interface import MLAAttentionSpec
-            is_mla = isinstance(kv_cache_spec, MLAAttentionSpec)
-            if is_mla:
-                # MLA: single combined KV buffer per layer
-                # page_size_bytes = block_size * num_kv_heads * head_size * dtype_size
-                cell_size = kv_cache_spec.page_size_bytes // block_size
-                num_kv_buffers = 1
-            else:
-                # MHA/GQA: separate K and V buffers
-                # page_size_bytes = 2 * block_size * num_kv_heads * head_size * dtype_size
-                cell_size = kv_cache_spec.page_size_bytes // block_size // 2
-                num_kv_buffers = 2
+            cell_size, num_kv_buffers = _get_kv_cache_params(kv_cache_spec, block_size)
 
             try:
                 from vllm.distributed.parallel_state import get_tensor_model_parallel_world_size
@@ -382,16 +392,7 @@ class KVCacheManagerPatch(VersionAwarePatch, BasePatch):
             block_size = getattr(self, "block_size")
             num_gpu_blocks = getattr(self, "num_gpu_blocks")
 
-            from vllm.v1.kv_cache_interface import MLAAttentionSpec
-            is_mla = isinstance(kv_cache_spec, MLAAttentionSpec)
-            if is_mla:
-                # MLA: single combined KV buffer
-                cell_size = kv_cache_spec.page_size_bytes // block_size
-                num_kv_buffers = 1
-            else:
-                # MHA/GQA: separate K and V buffers
-                cell_size = kv_cache_spec.page_size_bytes // block_size // 2
-                num_kv_buffers = 2
+            cell_size, num_kv_buffers = _get_kv_cache_params(kv_cache_spec, block_size)
 
             # Determine number of layers
             if hasattr(kv_cache_config, "tensors"):
