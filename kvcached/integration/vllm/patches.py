@@ -24,19 +24,6 @@ if TYPE_CHECKING:
         KVCacheBlock = Any  # type: ignore[misc,assignment]
         KVCacheEvent = Any  # type: ignore[misc,assignment]
 
-# Supported KV cache spec types — used by _validate_kv_cache_groups and
-# _get_kv_cache_params to accept FullAttention, SlidingWindow, and MLA specs.
-_SUPPORTED_SPEC_TYPES: tuple[type, ...] | None = None
-
-
-def _supported_spec_types() -> tuple[type, ...]:
-    """Lazily import and cache the supported spec types from vLLM."""
-    global _SUPPORTED_SPEC_TYPES
-    if _SUPPORTED_SPEC_TYPES is None:
-        from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec, SlidingWindowSpec
-        _SUPPORTED_SPEC_TYPES = (FullAttentionSpec, SlidingWindowSpec, MLAAttentionSpec)
-    return _SUPPORTED_SPEC_TYPES
-
 
 def _validate_kv_cache_groups(kv_cache_config: Any) -> None:
     """Validate KV cache groups for kvcached compatibility.
@@ -46,7 +33,9 @@ def _validate_kv_cache_groups(kv_cache_config: Any) -> None:
     same block geometry (block_size and cell_size).  Raises ValueError on
     mismatch.
     """
-    supported = _supported_spec_types()
+    from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec, SlidingWindowSpec
+
+    supported = (FullAttentionSpec, SlidingWindowSpec, MLAAttentionSpec)
     kv_groups = kv_cache_config.kv_cache_groups
 
     first_spec = kv_groups[0].kv_cache_spec
@@ -604,7 +593,6 @@ class GPUModelRunnerPatch(VersionAwarePatch, BasePatch):
             tensor_config = kv_cache_config.tensors[layer_name]
 
             is_mla = isinstance(kv_cache_spec, MLAAttentionSpec)
-
             dtype = kv_cache_spec.dtype
             num_blocks = tensor_config.size // kv_cache_spec.page_size_bytes
             assert num_blocks >= kv_cache_config.num_blocks
@@ -670,8 +658,8 @@ class GPUModelRunnerPatch(VersionAwarePatch, BasePatch):
                     layer_to_tensor_cfg[ln] = tensor_cfg
 
             for grp in kv_cache_config.kv_cache_groups:
+                layer_spec = grp.kv_cache_spec
                 for layer_name in grp.layer_names:
-                    layer_spec = grp.kv_cache_spec
                     tensor_cfg = layer_to_tensor_cfg[layer_name]
                     assert tensor_cfg.size % layer_spec.page_size_bytes == 0, (
                         f"Tensor size for layer {layer_name} ({tensor_cfg.size}) "
@@ -748,11 +736,9 @@ class GPUModelRunnerPatch(VersionAwarePatch, BasePatch):
             import torch
 
             kv_caches: dict[str, torch.Tensor] = {}
-            layer_id = 0
-            for kv_cache_group in kv_cache_config.kv_cache_groups:
-                for layer_name in kv_cache_group.layer_names:
-                    kv_caches[layer_name] = kv_cache_raw_tensors[layer_id]
-                    layer_id += 1
+            kv_cache_group = kv_cache_config.kv_cache_groups[0]
+            for idx, layer_name in enumerate(kv_cache_group.layer_names):
+                kv_caches[layer_name] = kv_cache_raw_tensors[idx]
             return kv_caches
 
         setattr(
