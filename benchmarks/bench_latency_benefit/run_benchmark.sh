@@ -1,137 +1,255 @@
 #!/bin/bash
-set -ex
 
-# Ensure Ctrl+C kills all background benchmark clients
-trap 'echo "Caught interrupt, killing all benchmark clients..."; kill $(jobs -p) 2>/dev/null; exit 1' INT TERM
+# Parameter sweep benchmark for bench_kvcached_vllm.py
+# Tests all combinations of: sending pattern x request rate x prompt length x generation length
+# Runs 3 model instances in parallel with staggered start (model_delay).
+#
+# Sending patterns:
+#   poisson  - Poisson process (exponential inter-arrival times, burstiness=1.0)
+#   uniform  - Near-constant inter-arrival times (gamma distribution with burstiness=100.0)
+#   ramp     - RPS increments by 1 each second: 1,2,...,peak,...,2,1,0
+#
+# NOTE: Ensure the vLLM server is configured with --max-model-len >= max(prompt) + max(gen)
+#       (e.g., 32768 to support 16384 prompt + 2048 gen). Adjust gpu-memory-utilization
+#       accordingly in bench-config.yaml.
 
-# Set environment variables
+trap 'echo ""; echo "Interrupted. Killing all benchmark clients..."; kill $(jobs -p) 2>/dev/null; exit 130' INT TERM
+
 export KVCACHED_IPC_NAME=VLLM
-
-# Add vLLM benchmarks and kvcached to Python path
 export PYTHONPATH="../../:../../benchmarks:$PYTHONPATH"
 
-# Benchmark parameters
-PROMPT_LEN=256
-COMPLETION_LEN=$2
+# ===================== Model Instances ===================
 BACKEND="vllm"
+ENDPOINT="/v1/completions"
 
-
-# Ramp-up-down parameters
-RAMP_START_RPS=0          # Starting request rate
-RAMP_PEAK_RPS=$1          # Peak request rate (middle)
-RAMP_END_RPS=1            # Ending request rate
-RAMP_INCREMENT=1          # RPS increment/decrement per second
-
-
-
-# Calculate total number of requests based on ramp pattern
-RAMP_UP_DURATION=$(( (RAMP_PEAK_RPS - RAMP_START_RPS) / RAMP_INCREMENT ))
-RAMP_DOWN_DURATION=$(( (RAMP_PEAK_RPS - RAMP_END_RPS) / RAMP_INCREMENT ))
-TOTAL_DURATION=$((RAMP_UP_DURATION + RAMP_DOWN_DURATION))
-
-MODEL_DELAY=$((RAMP_UP_DURATION/4 + RAMP_UP_DURATION*2))  # Delay in seconds before starting next model
-
-# # Calculate total requests: sum of all RPS values across all seconds
-# TOTAL_REQUESTS=$((RAMP_PEAK_RPS * RAMP_PEAK_RPS / 2))
-# for (( sec=1; sec<=RAMP_UP_DURATION; sec++ )); do
-#     RPS=$((RAMP_MIN_RPS + sec * RAMP_INCREMENT))
-#     TOTAL_REQUESTS=$((TOTAL_REQUESTS + RPS))
-# done
-# for (( sec=1; sec<=RAMP_DOWN_DURATION; sec++ )); do
-#     RPS=$((RAMP_PEAK_RPS - sec * RAMP_INCREMENT))
-#     TOTAL_REQUESTS=$((TOTAL_REQUESTS + RPS))
-# done
-
-NUM_PROMPTS=$((RAMP_PEAK_RPS * RAMP_PEAK_RPS))
-echo "Calculated NUM_PROMPTS: $NUM_PROMPTS (based on ramp pattern: ${TOTAL_DURATION}s duration)"
-
-mkdir -p results results/metrics
-
-# Define models and their configurations
 MODELS=(
-    "meta-llama/Llama-3.1-8B-Instruct:12346"
-    "meta-llama/Llama-3.1-8B-Instruct:30000"
-    "meta-llama/Llama-3.1-8B-Instruct:40000"
+    "Qwen/Qwen3-8B:12346"
+    "Qwen/Qwen3-8B:30000"
+    "Qwen/Qwen3-8B:40000"
 )
 NUM_MODELS=${#MODELS[@]}
 
-# Record unified start time
-UNIFIED_START_TIME=$(date +%s.%N)
-echo "Unified benchmark start time: $UNIFIED_START_TIME"
+# ================= Sweep Parameters ======================
+REQ_RATES=(5 10 20 30 40 50)
+# PROMPT_LENS=(128 256 512 1024 2048 4096 8192 16384)
+PROMPT_LENS=(128 256 512)
+# GEN_LENS=(64 128 256 512 1024 2048)
+GEN_LENS=(64 128 256 512 1024)
+PATTERNS=("poisson" "uniform" "ramp")
+# PATTERNS=("uniform" "ramp")
 
-# Arrays to store PIDs and result files
-PIDS=()
-RESULT_FILES=()
 
-# Run benchmarks for each model
-for i in "${!MODELS[@]}"; do
-    # Parse model and port
-    MODEL=$(echo "${MODELS[$i]}" | cut -d':' -f1)
-    PORT=$(echo "${MODELS[$i]}" | cut -d':' -f2)
+# Fixed number of requests for constant-rate patterns (poisson, uniform).
+# Ramp pattern uses rate^2 (determined by its schedule shape).
+NUM_REQUESTS=300
 
-    # Generate model name and result file
-    MODEL_NAME=$(echo "$MODEL" | tr '/' '-')
-    MODEL_INDEX=$((i + 1))
+# ===================== Output ============================
+RESULTS_DIR="results/sweep"
+LOG_DIR="results/sweep/logs"
+mkdir -p "$RESULTS_DIR" "$LOG_DIR"
 
-    # Generate result file name for ramp-up-down strategy
-    RESULT_FILE="results/metrics/${BACKEND}-${MODEL_NAME}-ramp-up-down-${RAMP_START_RPS}to${RAMP_PEAK_RPS}to${RAMP_END_RPS}-inc${RAMP_INCREMENT}-prompt_${PROMPT_LEN}-completion_${COMPLETION_LEN}-${MODEL_INDEX}-delay-${MODEL_DELAY}-model-num-${NUM_MODELS}.json"
+# ===================== Per-config runner =================
+# Launches all 3 model instances with staggered start, waits for completion.
+run_sweep_config() {
+    local pattern=$1 rate=$2 prompt_len=$3 gen_len=$4
+    local tag="${pattern}_rate${rate}_prompt${prompt_len}_gen${gen_len}"
 
-    # Add delay before starting next model (except for the first one)
-    if [ $i -gt 0 ] && [ "$MODEL_DELAY" -gt 0 ]; then
-        echo "Waiting ${MODEL_DELAY} seconds before starting Model ${MODEL_INDEX}..."
-        sleep $MODEL_DELAY
+    # Skip if ALL model results already exist
+    local all_exist=true
+    for i in "${!MODELS[@]}"; do
+        local mi=$((i + 1))
+        if [ ! -f "${RESULTS_DIR}/${tag}_model${mi}.json" ] || \
+           [ ! -s "${RESULTS_DIR}/${tag}_model${mi}.json" ]; then
+            all_exist=false
+            break
+        fi
+    done
+    if $all_exist; then
+        return 2  # signal: skipped
     fi
 
-    echo "Starting benchmark for $MODEL (Model ${MODEL_INDEX}) on port $PORT..."
+    # Calculate base num_prompts and model_delay
+    local base_num_prompts model_delay
+    case "$pattern" in
+        poisson|uniform)
+            base_num_prompts=$NUM_REQUESTS
+            # Delay = ~1/4 of expected duration (NUM_REQUESTS / rate seconds)
+            model_delay=$(( NUM_REQUESTS / rate / 4 ))
+            [ "$model_delay" -lt 5 ] && model_delay=5
+            ;;
+        ramp)
+            base_num_prompts=$((rate * rate))
+            # Original formula: ramp_up_duration/4 + ramp_up_duration*2
+            # With start=0, peak=rate, increment=1: ramp_up_duration = rate
+            model_delay=$(( rate / 4 + rate * 2 ))
+            ;;
+    esac
+    [ "$base_num_prompts" -lt 10 ] && base_num_prompts=10
 
-    MODEL_NUM_PROMPTS=$((NUM_PROMPTS + (NUM_MODELS - i) * MODEL_DELAY * RAMP_END_RPS))
-    echo "Using ramp-up-down strategy: ${RAMP_START_RPS} -> ${RAMP_PEAK_RPS} -> ${RAMP_END_RPS} RPS (increment: ±${RAMP_INCREMENT} RPS/sec)"
+    local UNIFIED_START_TIME
+    UNIFIED_START_TIME=$(date +%s.%N)
+    echo "  Unified start: ${UNIFIED_START_TIME}, model_delay: ${model_delay}s"
 
-    python bench_kvcached_vllm.py \
-        --backend "$BACKEND" \
-        --model "$MODEL" \
-        --dataset-name random \
-        --random-input-len "$PROMPT_LEN" \
-        --random-output-len "$COMPLETION_LEN" \
-        --num-prompts "$MODEL_NUM_PROMPTS" \
-        --host "localhost" \
-        --port "$PORT" \
-        --endpoint "/v1/completions" \
-        --save-result \
-        --result-filename "$RESULT_FILE" \
-        --metadata "unified_start_time=$UNIFIED_START_TIME" \
-        --ramp-up-strategy ramp-up-down \
-        --ramp-start-rps "$RAMP_START_RPS" \
-        --ramp-end-rps "$RAMP_END_RPS" \
-        --ramp-peak-rps "$RAMP_PEAK_RPS" \
-        --ramp-increment "$RAMP_INCREMENT" &
+    local PIDS=()
+    local RESULT_FILES=()
 
-    # Store PID and result file
-    PIDS+=($!)
-    RESULT_FILES+=("$RESULT_FILE")
+    for i in "${!MODELS[@]}"; do
+        local model_port="${MODELS[$i]}"
+        local model="${model_port%%:*}"
+        local port="${model_port##*:}"
+        local mi=$((i + 1))
+        local result_file="${RESULTS_DIR}/${tag}_model${mi}.json"
+        local log_file="${LOG_DIR}/${tag}_model${mi}.log"
 
-    echo "Started Model ${MODEL_INDEX} with PID ${PIDS[$i]}"
+        RESULT_FILES+=("$result_file")
+
+        # Stagger: delay before starting subsequent models
+        if [ "$i" -gt 0 ] && [ "$model_delay" -gt 0 ]; then
+            echo "  Waiting ${model_delay}s before starting model ${mi}..."
+            sleep "$model_delay"
+        fi
+
+        # Extra prompts so earlier models keep sending while later models catch up.
+        # For constant-rate patterns: extra = rate * delay * stagger_slots
+        # For ramp: extra = delay * stagger_slots (avg RPS ~ 1 during ramp-up)
+        local stagger_extra
+        local stagger_slots=$(( NUM_MODELS - 1 - i ))
+        case "$pattern" in
+            poisson|uniform) stagger_extra=$(( rate * model_delay * stagger_slots )) ;;
+            ramp)            stagger_extra=$(( model_delay * stagger_slots )) ;;
+        esac
+        local num_prompts=$((base_num_prompts + stagger_extra))
+        [ "$num_prompts" -lt 10 ] && num_prompts=10
+
+        local common_args=(
+            --backend "$BACKEND"
+            --model "$model"
+            --dataset-name random
+            --random-input-len "$prompt_len"
+            --random-output-len "$gen_len"
+            --num-prompts "$num_prompts"
+            --host "localhost"
+            --port "$port"
+            --endpoint "$ENDPOINT"
+            --save-result
+            --result-filename "$result_file"
+            --metadata "unified_start_time=$UNIFIED_START_TIME" \
+                       "pattern=$pattern" "req_rate=$rate" \
+                       "prompt_len=$prompt_len" "gen_len=$gen_len" \
+                       "model_index=$mi" "num_models=$NUM_MODELS" \
+                       "model_delay=$model_delay"
+        )
+
+        echo "  Starting model ${mi} on port ${port} (n=${num_prompts})..."
+
+        case "$pattern" in
+            poisson)
+                python bench_kvcached_vllm.py "${common_args[@]}" \
+                    --request-rate "$rate" \
+                    --burstiness 1.0 \
+                    >"$log_file" 2>&1 &
+                ;;
+            uniform)
+                python bench_kvcached_vllm.py "${common_args[@]}" \
+                    --request-rate "$rate" \
+                    --burstiness 100.0 \
+                    >"$log_file" 2>&1 &
+                ;;
+            ramp)
+                python bench_kvcached_vllm.py "${common_args[@]}" \
+                    --ramp-up-strategy ramp-up-down \
+                    --ramp-start-rps 0 \
+                    --ramp-peak-rps "$rate" \
+                    --ramp-end-rps 0 \
+                    --ramp-increment 1 \
+                    >"$log_file" 2>&1 &
+                ;;
+        esac
+
+        PIDS+=($!)
+        echo "  Model ${mi} started with PID ${PIDS[$i]}"
+    done
+
+    # Wait for all models to finish
+    echo "  Waiting for all ${NUM_MODELS} models to complete..."
+    local all_ok=true
+    for i in "${!PIDS[@]}"; do
+        wait "${PIDS[$i]}"
+        local ec=$?
+        local mi=$((i + 1))
+        if [ $ec -ne 0 ]; then
+            all_ok=false
+            echo "  Model ${mi} FAILED (exit=${ec}, see ${LOG_DIR}/${tag}_model${mi}.log)"
+        else
+            echo "  Model ${mi} OK"
+        fi
+    done
+
+    echo "  Results:"
+    for rf in "${RESULT_FILES[@]}"; do
+        echo "    - ${rf}"
+    done
+
+    $all_ok && return 0 || return 1
+}
+
+# ===================== Main sweep ========================
+total=$(( ${#PATTERNS[@]} * ${#REQ_RATES[@]} * ${#PROMPT_LENS[@]} * ${#GEN_LENS[@]} ))
+
+echo "========================================"
+echo "  Benchmark Parameter Sweep (${NUM_MODELS} instances)"
+echo "========================================"
+echo "Models:"
+for m in "${MODELS[@]}"; do
+    echo "  - ${m}"
+done
+echo "Rates:    ${REQ_RATES[*]}"
+echo "Prompts:  ${PROMPT_LENS[*]}"
+echo "Gen:      ${GEN_LENS[*]}"
+echo "Patterns: ${PATTERNS[*]}"
+echo "Total:    ${total} configurations (x${NUM_MODELS} models each)"
+echo "Output:   ${RESULTS_DIR}/"
+echo "========================================"
+echo ""
+
+ok=0; fail=0; skip=0; count=0
+
+for pattern in "${PATTERNS[@]}"; do
+  for rate in "${REQ_RATES[@]}"; do
+    for prompt_len in "${PROMPT_LENS[@]}"; do
+      for gen_len in "${GEN_LENS[@]}"; do
+        count=$((count + 1))
+        tag="${pattern}_rate${rate}_prompt${prompt_len}_gen${gen_len}"
+
+        echo "[${count}/${total}] ${tag}"
+
+        run_sweep_config "$pattern" "$rate" "$prompt_len" "$gen_len"
+        rc=$?
+
+        if [ $rc -eq 2 ]; then
+            skip=$((skip + 1))
+            echo "  SKIP (all model results exist)"
+        elif [ $rc -eq 0 ]; then
+            ok=$((ok + 1))
+            echo "  DONE"
+        else
+            fail=$((fail + 1))
+            echo "  FAIL (one or more models failed)"
+        fi
+
+        echo "  Progress: $((ok + fail + skip))/${total}  (ok=${ok} fail=${fail} skip=${skip})"
+        echo ""
+      done
+    done
+  done
 done
 
-# Wait for all benchmarks to complete
-echo "Waiting for all benchmarks to complete..."
-EXIT_CODES=()
-
-for i in "${!PIDS[@]}"; do
-    wait ${PIDS[$i]}
-    EXIT_CODE=$?
-    EXIT_CODES+=($EXIT_CODE)
-    echo "Model $((i + 1)) benchmark exit code: $EXIT_CODE"
-done
-
-echo "All benchmarks completed!"
-echo "Results saved to:"
-for result_file in "${RESULT_FILES[@]}"; do
-    echo "  - $result_file"
-done
-
-# Summary of exit codes
-echo "Exit code summary:"
-for i in "${!EXIT_CODES[@]}"; do
-    echo "  Model $((i + 1)): ${EXIT_CODES[$i]}"
-done
+echo "========================================"
+echo "  Sweep Complete"
+echo "========================================"
+echo "Succeeded: $ok"
+echo "Failed:    $fail"
+echo "Skipped:   $skip"
+echo "Total:     $total"
+echo "Results:   $RESULTS_DIR/"
+echo "========================================"
