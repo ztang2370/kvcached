@@ -615,7 +615,7 @@ class ElasticMLAMemoryPoolPatch(VersionAwarePatch, BasePatch):
                     if "cuda" not in device:
                         raise ValueError("ElasticMLATokenToKVPool only supports cuda device")
                     self.kv_buffer = cast(
-                        List[Any],
+                        List[torch.Tensor],
                         kvi.alloc_kv_cache(
                             kvcache_shape=(
                                 size + page_size,
