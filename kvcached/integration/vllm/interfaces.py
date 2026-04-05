@@ -93,6 +93,7 @@ def alloc_kv_cache(
     attention_type: str = "MHA",  # MHA, GQA, or MLA.
     kv_layout: str = "NHD",  # NHD: (num_tokens, head_num, head_dim)
     group_id: int = 0,
+    return_raw_buffers: bool = False,
 ) -> List[torch.Tensor]:
     """Allocate KV cache tensors for all supported attention types.
 
@@ -101,6 +102,22 @@ def alloc_kv_cache(
       - FlashInfer: (num_blocks, 2, block_size, head_num, head_dim)
     For MLA, kvcache_shape is expected to be:
       - (num_blocks, block_size, head_size)
+
+    For hybrid models (attention + mamba), the caller should set
+    ``num_layers`` to the group_size (max layers across KV cache groups)
+    and pass ``return_raw_buffers=True``.  The same VM-backed tensor pool
+    is shared by one attention layer and one mamba layer, mirroring the
+    native vLLM ``KVCacheTensor`` sharing pattern.
+
+    Returns:
+        List[torch.Tensor] when return_raw_buffers is False.
+        Otherwise (kv_tensors, raw_info) where raw_info is a dict with:
+          buffers          - raw int8 tensors (per-pool list or single base)
+          num_blocks       - number of blocks per pool
+          page_size_bytes  - bytes per block per pool
+          block_stride_bytes - byte stride between consecutive blocks
+          num_pools        - number of pools (== num_layers)
+          is_contiguous    - whether contiguous layout is used
     """
     if not _kvcached_initialized:
         raise RuntimeError("kvcached is not initialized. Please call init_kvcached() first.")
@@ -170,6 +187,10 @@ def alloc_kv_cache(
     actual_kvcache_shape: List[int] = list(kvcache_shape)
     actual_kvcache_shape[blocks_dim_idx] = num_blocks_per_layer
 
+    page_size_bytes = math.prod(
+        actual_kvcache_shape[:blocks_dim_idx] + actual_kvcache_shape[blocks_dim_idx + 1:]
+    ) * dtype.itemsize
+
     # --- Reshape raw tensors into per-layer KV cache views ---
     if not _contiguous_layout:
         kv_tensors: List[torch.Tensor] = []
@@ -212,7 +233,26 @@ def alloc_kv_cache(
             contiguous_tensor[:, i].permute(*permute_order) for i in range(num_layers)
         ]
 
-    return kv_tensors
+    if not return_raw_buffers:
+        return kv_tensors
+
+    # --- Build raw info for mamba / non-attention layers ---
+    if not _contiguous_layout:
+        raw_buffers = list(raw_kv_tensors)
+        block_stride_bytes = page_size_bytes
+    else:
+        raw_buffers = [raw_kv_tensors[0]]
+        block_stride_bytes = num_layers * page_size_bytes
+
+    raw_info = {
+        "buffers": raw_buffers,
+        "num_blocks": num_blocks_per_layer,
+        "page_size_bytes": page_size_bytes,
+        "block_stride_bytes": block_stride_bytes,
+        "num_pools": num_layers,
+        "is_contiguous": _contiguous_layout,
+    }
+    return kv_tensors, raw_info  # type: ignore[return-value]
 
 
 def get_kv_cache_manager(
