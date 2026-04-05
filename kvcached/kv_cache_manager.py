@@ -208,6 +208,9 @@ class KVCacheManager:
             if not self.avail_pages:
                 page = self.page_allocator.alloc_page()
                 page.init(self.block_mem_size)
+                if page.num_free_blocks() == 0:
+                    self.full_pages[page.page_id] = page
+                    continue
                 self.num_avail_blocks += page.num_free_blocks()
             else:
                 _, page = self.avail_pages.popitem()

@@ -117,11 +117,17 @@ def _should_enable_async_sched(vllm_config: Any) -> bool:
 
 
 def _reshape_mamba_non_contiguous(
-    raw_tensor: Any, kv_cache_spec: Any, get_dtype_size: Any,
+    raw_int8: Any, kv_cache_spec: Any, get_dtype_size: Any,
 ) -> list:
-    """Create strided mamba state views from a per-layer int8 buffer."""
+    """Create strided mamba state views from a per-pool flat int8 buffer.
+
+    Mirrors vLLM's native ``_reshape_kv_cache_tensors`` for MambaSpec:
+    the raw int8 buffer is reinterpreted via ``torch.as_strided`` into
+    the shapes/dtypes declared by the spec.
+    """
     import torch
 
+    raw_tensor = raw_int8
     num_blocks = raw_tensor.numel() // kv_cache_spec.page_size_bytes
     state_tensors: list = []
     storage_offset_bytes = 0
@@ -155,7 +161,7 @@ def _reshape_mamba_contiguous(
     """
     import torch
 
-    base_buffer = mamba_info["buffers"][0]
+    base_buffer = mamba_info["buffers"][0]  # flat int8 buffer
     num_blocks = mamba_info["num_blocks"]
     page_size_bytes = mamba_info["page_size_bytes"]
     block_stride_bytes = mamba_info["block_stride_bytes"]
@@ -617,7 +623,16 @@ class KVCacheCoordinatorPatch(VersionAwarePatch, BasePatch):
             kv_cache_spec = first_attn_group.kv_cache_spec
             block_size = kv_cache_spec.block_size
 
-            cell_size, num_kv_buffers = _get_kv_cache_params(kv_cache_spec, block_size)
+            has_mamba = any(
+                _is_mamba_spec(g.kv_cache_spec)
+                for g in kv_cache_config.kv_cache_groups
+            )
+
+            if has_mamba:
+                cell_size = kv_cache_spec.page_size_bytes // block_size
+                num_kv_buffers = 1
+            else:
+                cell_size, num_kv_buffers = _get_kv_cache_params(kv_cache_spec, block_size)
 
             try:
                 from vllm.distributed.parallel_state import get_tensor_model_parallel_world_size
@@ -1071,6 +1086,7 @@ class GPUModelRunnerPatch(VersionAwarePatch, BasePatch):
                 attention_type="MLA" if is_mla else "MHA",
                 kv_layout="NHD",
                 return_raw_buffers=has_mamba,
+                num_kv_buffers_override=1 if has_mamba else None,
             )
 
             if has_mamba:
@@ -1125,22 +1141,25 @@ class GPUModelRunnerPatch(VersionAwarePatch, BasePatch):
 
             mamba_info = getattr(self, "_kvcached_mamba_raw_info", None)
 
-            # kv_cache_raw_tensors is a list of pool tensors indexed by
-            # pool_idx.  Map each layer to its pool following vLLM's sharing
-            # pattern: pool i is shared by layer i from each group.
             for kv_cache_group in kv_cache_config.kv_cache_groups:
                 kv_cache_spec = kv_cache_group.kv_cache_spec
 
                 if _is_mamba_spec(kv_cache_spec):
                     has_mamba = True
+                    if mamba_info is None:
+                        raise RuntimeError(
+                            "Mamba layers found but no raw buffer info "
+                            "available from kvcached"
+                        )
                     for pool_idx, layer_name in enumerate(kv_cache_group.layer_names):
-                        if mamba_info is not None and mamba_info["is_contiguous"]:
+                        if mamba_info["is_contiguous"]:
                             state_tensors = _reshape_mamba_contiguous(
                                 mamba_info, kv_cache_spec, pool_idx, get_dtype_size,
                             )
                         else:
                             state_tensors = _reshape_mamba_non_contiguous(
-                                kv_cache_raw_tensors[pool_idx], kv_cache_spec, get_dtype_size,
+                                mamba_info["buffers"][pool_idx],
+                                kv_cache_spec, get_dtype_size,
                             )
                         kv_caches[layer_name] = state_tensors  # type: ignore[assignment]
                 else:

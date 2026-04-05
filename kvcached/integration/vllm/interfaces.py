@@ -94,6 +94,7 @@ def alloc_kv_cache(
     kv_layout: str = "NHD",  # NHD: (num_tokens, head_num, head_dim)
     group_id: int = 0,
     return_raw_buffers: bool = False,
+    num_kv_buffers_override: Optional[int] = None,
 ) -> List[torch.Tensor]:
     """Allocate KV cache tensors for all supported attention types.
 
@@ -104,20 +105,23 @@ def alloc_kv_cache(
       - (num_blocks, block_size, head_size)
 
     For hybrid models (attention + mamba), the caller should set
-    ``num_layers`` to the group_size (max layers across KV cache groups)
-    and pass ``return_raw_buffers=True``.  The same VM-backed tensor pool
-    is shared by one attention layer and one mamba layer, mirroring the
-    native vLLM ``KVCacheTensor`` sharing pattern.
+    ``num_layers`` to the group_size, ``return_raw_buffers=True``,
+    and ``num_kv_buffers_override=1``.  Using a single FTensor per
+    pool ensures VM page mappings use page_size_bytes granularity
+    (K+V combined), matching the ``as_strided_`` access pattern that
+    vLLM's ``_update_hybrid_attention_mamba_layout`` applies.
 
     Returns:
         List[torch.Tensor] when return_raw_buffers is False.
         Otherwise (kv_tensors, raw_info) where raw_info is a dict with:
-          buffers          - raw int8 tensors (per-pool list or single base)
-          num_blocks       - number of blocks per pool
-          page_size_bytes  - bytes per block per pool
-          block_stride_bytes - byte stride between consecutive blocks
-          num_pools        - number of pools (== num_layers)
-          is_contiguous    - whether contiguous layout is used
+          buffers            - flat int8 tensors (one per pool when
+                               non-contiguous, single base when contiguous)
+          num_blocks         - number of blocks per pool
+          page_size_bytes    - uniform page size (bytes) shared by all groups
+          block_stride_bytes - byte stride between consecutive blocks of the
+                               same pool
+          num_pools          - number of pools (== num_layers)
+          is_contiguous      - whether contiguous layout is used
     """
     if not _kvcached_initialized:
         raise RuntimeError("kvcached is not initialized. Please call init_kvcached() first.")
@@ -179,9 +183,10 @@ def alloc_kv_cache(
             f"Requested {requested_num_blocks} blocks, but only {num_blocks_per_layer} blocks are available."
         )
 
+    actual_num_kv_buffers = num_kv_buffers_override if num_kv_buffers_override is not None else num_k_or_v
     raw_kv_tensors = create_kv_tensors(
         gpu_mem_bytes_per_layer_k_or_v * num_k_or_v, dtype.itemsize, device, num_layers,
-        num_kv_buffers=num_k_or_v, group_id=group_id,
+        num_kv_buffers=actual_num_kv_buffers, group_id=group_id,
     )
 
     actual_kvcache_shape: List[int] = list(kvcache_shape)
@@ -236,16 +241,17 @@ def alloc_kv_cache(
     if not return_raw_buffers:
         return kv_tensors
 
-    # --- Build raw info for mamba / non-attention layers ---
+    # --- Build raw int8 buffers for hybrid model (mamba) support ---
     if not _contiguous_layout:
-        raw_buffers = list(raw_kv_tensors)
+        pool_bytes = num_blocks_per_layer * page_size_bytes
+        raw_int8 = [t.view(torch.int8)[:pool_bytes] for t in raw_kv_tensors]
         block_stride_bytes = page_size_bytes
     else:
-        raw_buffers = [raw_kv_tensors[0]]
+        raw_int8 = [raw_kv_tensors[0].view(torch.int8)]
         block_stride_bytes = num_layers * page_size_bytes
 
     raw_info = {
-        "buffers": raw_buffers,
+        "buffers": raw_int8,
         "num_blocks": num_blocks_per_layer,
         "page_size_bytes": page_size_bytes,
         "block_stride_bytes": block_stride_bytes,
