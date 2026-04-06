@@ -172,10 +172,37 @@ def alloc_kv_cache(
 
     # --- Reshape raw tensors into per-layer KV cache views ---
     if not _contiguous_layout:
-        num_eles = math.prod(actual_kvcache_shape)
-        kv_tensors: List[torch.Tensor] = [
-            t.view(dtype=dtype)[:num_eles].view(actual_kvcache_shape) for t in raw_kv_tensors
-        ]
+        kv_tensors: List[torch.Tensor] = []
+        if is_mla:
+            num_eles = math.prod(actual_kvcache_shape)
+            kv_tensors = [
+                t.view(dtype=dtype)[:num_eles].view(actual_kvcache_shape)
+                for t in raw_kv_tensors
+            ]
+        else:
+            # In the per-layer FTensors, K occupies [0, v_offset) and V
+            # occupies [v_offset, 2*v_offset) where v_offset equals
+            # gpu_mem_bytes_per_layer_k_or_v.  A plain contiguous view
+            # would place V at num_blocks_per_layer * block_mem_bytes,
+            # which differs from v_offset when block_mem_bytes does not
+            # evenly divide gpu_mem_bytes_per_layer_k_or_v.  Use
+            # as_strided so the K/V dimension stride matches the real
+            # V offset in the underlying virtual memory.
+            v_offset_eles = gpu_mem_bytes_per_layer_k_or_v // dtype.itemsize
+            shape = list(actual_kvcache_shape)
+            strides = [0] * len(shape)
+            strides[-1] = 1
+            for i in range(len(shape) - 2, 1, -1):
+                strides[i] = strides[i + 1] * shape[i + 1]
+            if blocks_dim_idx == 1:              # FlashAttn (2, N, ...)
+                strides[1] = strides[2] * shape[2]
+                strides[0] = v_offset_eles
+            else:                                 # FlashInfer (N, 2, ...)
+                strides[0] = strides[2] * shape[2]
+                strides[1] = v_offset_eles
+            for t in raw_kv_tensors:
+                kv_tensors.append(
+                    torch.as_strided(t.view(dtype=dtype), shape, strides))
     else:
         layer_elem_shape = actual_kvcache_shape[:blocks_dim_idx] + actual_kvcache_shape[blocks_dim_idx + 1:]
         contiguous_shape = [num_blocks_per_layer, num_layers] + layer_elem_shape
