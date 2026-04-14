@@ -273,30 +273,65 @@ class ElasticBlockPoolPatch(VersionAwarePatch, BasePatch):
                 self,
                 request: "Request",
                 blocks: list["KVCacheBlock"],
-                num_cached_blocks: int,
-                num_full_blocks: int,
-                block_size: int,
-                kv_cache_group_id: int = 0,
+                *args: Any,
+                **kwargs: Any,
             ) -> None:
                 if not self.enable_prefix_cache:
                     return
+
+                # Compatibility with vLLM call signatures across versions:
+                # - (request, blocks, num_cached_blocks, num_full_blocks, block_size[, kv_cache_group_id])
+                # - (request, blocks, block_hashes, num_cached_blocks, num_full_blocks, block_size[, kv_cache_group_id], hash_fn)
+                # - keyword variants containing block_hashes/hash_fn.
+                block_hashes = kwargs.pop("block_hashes", None)
+                num_cached_blocks = kwargs.pop("num_cached_blocks", None)
+                num_full_blocks = kwargs.pop("num_full_blocks", None)
+                _block_size = kwargs.pop("block_size", None)
+                kv_cache_group_id = kwargs.pop("kv_cache_group_id", 0)
+                _hash_fn = kwargs.pop("hash_fn", None)
+
+                remaining_args = list(args)
+                if block_hashes is None and remaining_args and isinstance(remaining_args[0], (list, tuple)):
+                    block_hashes = remaining_args.pop(0)
+
+                if num_cached_blocks is None and remaining_args:
+                    num_cached_blocks = remaining_args.pop(0)
+                if num_full_blocks is None and remaining_args:
+                    num_full_blocks = remaining_args.pop(0)
+                if _block_size is None and remaining_args:
+                    _block_size = remaining_args.pop(0)
+                if remaining_args and isinstance(remaining_args[0], int):
+                    kv_cache_group_id = remaining_args.pop(0)
+                if remaining_args:
+                    # Final positional argument is typically hash_fn; ignored.
+                    _hash_fn = remaining_args.pop(0)
+
+                if num_cached_blocks is None or num_full_blocks is None:
+                    raise TypeError(
+                        "cache_full_blocks requires num_cached_blocks and num_full_blocks"
+                    )
+                num_cached_blocks = int(num_cached_blocks)
+                num_full_blocks = int(num_full_blocks)
+                kv_cache_group_id = int(kv_cache_group_id)
 
                 if num_cached_blocks >= num_full_blocks:
                     return
 
                 new_full_blocks = blocks[num_cached_blocks:num_full_blocks]
 
-                assert hasattr(request, 'block_hashes'), "Request missing block_hashes attribute"
-                assert len(request.block_hashes) >= num_full_blocks, \
-                    f"Request has {len(request.block_hashes)} hashes but need {num_full_blocks}"
+                if block_hashes is None:
+                    assert hasattr(request, "block_hashes"), "Request missing block_hashes attribute"
+                    block_hashes = request.block_hashes
+                assert len(block_hashes) >= num_full_blocks, \
+                    f"Request has {len(block_hashes)} hashes but need {num_full_blocks}"
 
                 for i, block in enumerate(new_full_blocks):
                     if hasattr(block, 'is_null') and block.is_null:
                         continue
 
                     block_idx = num_cached_blocks + i
-                    block_hash = request.block_hashes[block_idx]
-                    key = self._make_cache_key(block_hash, int(kv_cache_group_id))
+                    block_hash = block_hashes[block_idx]
+                    key = self._make_cache_key(block_hash, kv_cache_group_id)
 
                     # Already cached, idempotent
                     if key in self._cached_blocks:
