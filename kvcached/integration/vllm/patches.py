@@ -326,7 +326,7 @@ class ElasticBlockPoolPatch(VersionAwarePatch, BasePatch):
                     f"Request has {len(block_hashes)} hashes but need {num_full_blocks}"
 
                 for i, block in enumerate(new_full_blocks):
-                    if hasattr(block, 'is_null') and block.is_null:
+                    if bool(getattr(block, "is_null", False)):
                         continue
 
                     block_idx = num_cached_blocks + i
@@ -398,7 +398,7 @@ class ElasticBlockPoolPatch(VersionAwarePatch, BasePatch):
                     block_ids = [
                         block.block_id
                         for block in ordered_blocks
-                        if block is not None and not block.is_null
+                        if block is not None and not bool(getattr(block, "is_null", False))
                     ]
                     if block_ids:
                         self.kv_cache_manager.free(block_ids)
@@ -406,7 +406,7 @@ class ElasticBlockPoolPatch(VersionAwarePatch, BasePatch):
 
                 uncached_to_free: list[int] = []
                 for block in ordered_blocks:
-                    if block is None or block.is_null:
+                    if block is None or bool(getattr(block, "is_null", False)):
                         continue
                     block.ref_cnt -= 1
                     if block.ref_cnt == 0:
