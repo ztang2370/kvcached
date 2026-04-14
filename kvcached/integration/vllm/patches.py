@@ -31,14 +31,24 @@ if TYPE_CHECKING:
 def _validate_kv_cache_groups(kv_cache_config: Any) -> None:
     """Validate KV cache groups for kvcached compatibility.
 
-    Checks that all groups use supported spec types (FullAttentionSpec,
-    SlidingWindowSpec, or MLAAttentionSpec) and that all groups share the
-    same block geometry (block_size and cell_size).  Raises ValueError on
-    mismatch.
+    Checks that all groups use supported attention spec types and that all
+    groups share the same block geometry (block_size and cell_size).
+    Raises ValueError on mismatch.
     """
-    from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec, SlidingWindowSpec
+    from vllm.v1 import kv_cache_interface as kv_cache_interface_mod
 
-    supported = (FullAttentionSpec, SlidingWindowSpec, MLAAttentionSpec)
+    supported_names = (
+        "FullAttentionSpec",
+        "SlidingWindowSpec",
+        "MLAAttentionSpec",
+        "AttentionSpec",
+    )
+    supported: tuple[type[Any], ...] = tuple(
+        dict.fromkeys(
+            cls for cls in
+            (getattr(kv_cache_interface_mod, name, None) for name in supported_names)
+            if isinstance(cls, type))
+    )
     kv_groups = kv_cache_config.kv_cache_groups
 
     first_spec = kv_groups[0].kv_cache_spec
@@ -47,10 +57,16 @@ def _validate_kv_cache_groups(kv_cache_config: Any) -> None:
 
     for idx, grp in enumerate(kv_groups):
         grp_spec = grp.kv_cache_spec
-        if not isinstance(grp_spec, supported):
+        is_supported_type = isinstance(grp_spec, supported)
+        has_attention_shape = all(
+            hasattr(grp_spec, attr)
+            for attr in ("block_size", "page_size_bytes", "num_kv_heads", "head_size", "dtype")
+        )
+        if not is_supported_type and not has_attention_shape:
             raise ValueError(
-                f"kvcached only supports FullAttentionSpec, SlidingWindowSpec, "
-                f"and MLAAttentionSpec, got {type(grp_spec).__name__} in group {idx}"
+                "kvcached only supports known attention KV-cache specs "
+                f"({', '.join(supported_names)}) for group validation; got "
+                f"{type(grp_spec).__name__} in group {idx}"
             )
         grp_block_size = grp_spec.block_size
         grp_cell_size, _ = _get_kv_cache_params(grp_spec, grp_block_size)
@@ -90,9 +106,7 @@ def _get_kv_cache_params(kv_cache_spec: Any, block_size: int) -> tuple:
     Returns:
         (cell_size, num_kv_buffers)
     """
-    from vllm.v1.kv_cache_interface import MLAAttentionSpec
-
-    if isinstance(kv_cache_spec, MLAAttentionSpec):
+    if _is_mla_kv_cache_spec(kv_cache_spec):
         # MLA: single combined KV buffer per layer
         # page_size_bytes = block_size * num_kv_heads * head_size * dtype_size
         cell_size = kv_cache_spec.page_size_bytes // block_size
@@ -103,6 +117,21 @@ def _get_kv_cache_params(kv_cache_spec: Any, block_size: int) -> tuple:
         cell_size = kv_cache_spec.page_size_bytes // block_size // 2
         num_kv_buffers = 2
     return cell_size, num_kv_buffers
+
+
+def _is_mla_kv_cache_spec(kv_cache_spec: Any) -> bool:
+    """Return whether this KV cache spec should use MLA layout.
+
+    Some vLLM versions mark MLA via `use_mla` on generic attention specs,
+    while others expose `MLAAttentionSpec`.
+    """
+    if bool(getattr(kv_cache_spec, "use_mla", False)):
+        return True
+    try:
+        from vllm.v1.kv_cache_interface import MLAAttentionSpec
+    except ImportError:
+        return False
+    return isinstance(kv_cache_spec, MLAAttentionSpec)
 
 
 def _get_max_cached_blocks(block_size: int) -> int:
@@ -789,7 +818,6 @@ class GPUModelRunnerPatch(VersionAwarePatch, BasePatch):
 
         def _patched_initialize_kv_cache(self, kv_cache_config: Any) -> None:
             import torch
-            from vllm.v1.kv_cache_interface import MLAAttentionSpec
             from vllm.v1.utils import bind_kv_cache
 
             from kvcached.integration.vllm import interfaces as kvi
@@ -815,7 +843,7 @@ class GPUModelRunnerPatch(VersionAwarePatch, BasePatch):
             kv_cache_spec = kv_cache_config.kv_cache_groups[0].kv_cache_spec
             tensor_config = kv_cache_config.tensors[layer_name]
 
-            is_mla = isinstance(kv_cache_spec, MLAAttentionSpec)
+            is_mla = _is_mla_kv_cache_spec(kv_cache_spec)
             dtype = kv_cache_spec.dtype
             num_blocks = tensor_config.size // kv_cache_spec.page_size_bytes
             assert num_blocks >= kv_cache_config.num_blocks
@@ -862,7 +890,7 @@ class GPUModelRunnerPatch(VersionAwarePatch, BasePatch):
 
         def _allocate_kv_cache_from_kvcached(self, kv_cache_config):
             import torch
-            from vllm.v1.kv_cache_interface import KVCacheTensor, MLAAttentionSpec
+            from vllm.v1.kv_cache_interface import KVCacheTensor
 
             from kvcached.integration.vllm import interfaces as kvi
 
@@ -873,7 +901,7 @@ class GPUModelRunnerPatch(VersionAwarePatch, BasePatch):
             first_kv_cache_group = kv_cache_config.kv_cache_groups[0]
             kv_cache_spec = first_kv_cache_group.kv_cache_spec
 
-            is_mla = isinstance(kv_cache_spec, MLAAttentionSpec)
+            is_mla = _is_mla_kv_cache_spec(kv_cache_spec)
 
             layer_to_tensor_cfg: dict[str, KVCacheTensor] = {}
             for tensor_cfg in kv_cache_config.kv_cache_tensors:
