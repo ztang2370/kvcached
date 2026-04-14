@@ -35,7 +35,7 @@ def _validate_kv_cache_groups(kv_cache_config: Any) -> None:
     groups share the same block geometry (block_size and cell_size).
     Raises ValueError on mismatch.
     """
-    from vllm.v1 import kv_cache_interface as kv_cache_interface_mod
+    from vllm.v1 import kv_cache_interface
 
     supported_names = (
         "FullAttentionSpec",
@@ -46,7 +46,7 @@ def _validate_kv_cache_groups(kv_cache_config: Any) -> None:
     supported: tuple[type[Any], ...] = tuple(
         dict.fromkeys(
             cls for cls in
-            (getattr(kv_cache_interface_mod, name, None) for name in supported_names)
+            (getattr(kv_cache_interface, name, None) for name in supported_names)
             if isinstance(cls, type))
     )
     kv_groups = kv_cache_config.kv_cache_groups
@@ -58,11 +58,7 @@ def _validate_kv_cache_groups(kv_cache_config: Any) -> None:
     for idx, grp in enumerate(kv_groups):
         grp_spec = grp.kv_cache_spec
         is_supported_type = isinstance(grp_spec, supported)
-        has_attention_shape = all(
-            hasattr(grp_spec, attr)
-            for attr in ("block_size", "page_size_bytes", "num_kv_heads", "head_size", "dtype")
-        )
-        if not is_supported_type and not has_attention_shape:
+        if not is_supported_type:
             raise ValueError(
                 "kvcached only supports known attention KV-cache specs "
                 f"({', '.join(supported_names)}) for group validation; got "
