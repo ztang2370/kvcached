@@ -241,19 +241,32 @@ class ElasticBlockPoolPatch(VersionAwarePatch, BasePatch):
             def get_cached_block(
                 self,
                 block_hash: Any,
-                kv_cache_group_ids: list[int]
-            ) -> Optional[list["KVCacheBlock"]]:
+                kv_cache_group_ids: Optional[Iterable[int]] = None,
+            ) -> Optional[Any]:
                 if not self.enable_prefix_cache:
                     return None
 
+                # Backward compatibility:
+                # - Older vLLM versions call get_cached_block(block_hash)
+                #   and expect a single KVCacheBlock.
+                # - Newer hybrid-attention paths pass multiple group ids and
+                #   expect one block per group.
+                if kv_cache_group_ids is None:
+                    key = self._make_cache_key(block_hash, 0)
+                    return self._cached_blocks.get(key)
+                if isinstance(kv_cache_group_ids, int):
+                    kv_cache_group_ids = [int(kv_cache_group_ids)]
+
                 cached_blocks: list["KVCacheBlock"] = []
                 for group_id in kv_cache_group_ids:
-                    key = self._make_cache_key(block_hash, group_id)
+                    key = self._make_cache_key(block_hash, int(group_id))
                     block = self._cached_blocks.get(key)
                     if block is None:
                         # Atomic: all groups must hit or return None
                         return None
                     cached_blocks.append(block)
+                if not cached_blocks:
+                    return None
                 return cached_blocks
 
             def cache_full_blocks(
@@ -263,7 +276,7 @@ class ElasticBlockPoolPatch(VersionAwarePatch, BasePatch):
                 num_cached_blocks: int,
                 num_full_blocks: int,
                 block_size: int,
-                kv_cache_group_id: int,
+                kv_cache_group_id: int = 0,
             ) -> None:
                 if not self.enable_prefix_cache:
                     return
@@ -283,7 +296,7 @@ class ElasticBlockPoolPatch(VersionAwarePatch, BasePatch):
 
                     block_idx = num_cached_blocks + i
                     block_hash = request.block_hashes[block_idx]
-                    key = self._make_cache_key(block_hash, kv_cache_group_id)
+                    key = self._make_cache_key(block_hash, int(kv_cache_group_id))
 
                     # Already cached, idempotent
                     if key in self._cached_blocks:
