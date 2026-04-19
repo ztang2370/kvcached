@@ -29,14 +29,14 @@ if TYPE_CHECKING:
 
 
 def _is_attention_spec(spec: Any) -> bool:
-    """Check if a KV cache spec is an attention-type spec managed by kvcached."""
+    """Check if a KV cache spec is an attention-type spec."""
     from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec, SlidingWindowSpec
 
     return isinstance(spec, (FullAttentionSpec, SlidingWindowSpec, MLAAttentionSpec))
 
 
 def _is_mamba_spec(spec: Any) -> bool:
-    """Check if a KV cache spec is a MambaSpec (SSM state, not managed by kvcached)."""
+    """Check if a KV cache spec is a MambaSpec."""
     try:
         from vllm.v1.kv_cache_interface import MambaSpec
 
@@ -106,6 +106,34 @@ def _validate_kv_cache_groups(kv_cache_config: Any) -> None:
 def _count_kv_cache_layers(kv_cache_config: Any) -> int:
     """Return the total number of KV cache layers across all groups."""
     return sum(len(g.layer_names) for g in kv_cache_config.kv_cache_groups)
+
+
+def _infer_attention_type(kv_cache_config: Any) -> str:
+    """Pick the kvcached attention_type for this KV cache config.
+
+    Returns one of: "MLA", "HYBRID_LINEAR", "MHA". HYBRID_LINEAR
+    requires both a FullAttentionSpec group and a linear-attention
+    (mamba/SSM) group to be present.
+    """
+    from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec
+
+    has_full_attn = False
+    has_mla = False
+    has_mamba = False
+    for grp in kv_cache_config.kv_cache_groups:
+        spec = grp.kv_cache_spec
+        if isinstance(spec, MLAAttentionSpec):
+            has_mla = True
+        elif isinstance(spec, FullAttentionSpec):
+            has_full_attn = True
+        elif _is_mamba_spec(spec):
+            has_mamba = True
+
+    if has_mla:
+        return "MLA"
+    if has_full_attn and has_mamba:
+        return "HYBRID_LINEAR"
+    return "MHA"
 
 
 def _should_enable_async_sched(vllm_config: Any) -> bool:
@@ -196,7 +224,11 @@ VLLM_V10_RANGE = ">0.9.2"  # vLLM 0.10.x+ versions, need to cover 0.10.0rc1
 VLLM_ALL_RANGE = ">=0.8.4"  # All supported versions
 
 
-def _get_kv_cache_params(kv_cache_spec: Any, block_size: int) -> tuple:
+def _get_kv_cache_params(
+    kv_cache_spec: Any,
+    block_size: int,
+    attention_type: str = "MHA",
+) -> tuple:
     """Determine cell_size and num_kv_buffers from a KV cache spec.
 
     Returns:
@@ -204,8 +236,11 @@ def _get_kv_cache_params(kv_cache_spec: Any, block_size: int) -> tuple:
     """
     from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
-    if isinstance(kv_cache_spec, MLAAttentionSpec):
+    if attention_type in ("MLA", "HYBRID_LINEAR") or isinstance(kv_cache_spec, MLAAttentionSpec):
         # MLA: single combined KV buffer per layer
+        # HYBRID_LINEAR (full attention + linear attention): K and V are
+        # interleaved into one buffer per layer, so it shares MLA's
+        # single-buffer math.
         # page_size_bytes = block_size * num_kv_heads * head_size * dtype_size
         cell_size = kv_cache_spec.page_size_bytes // block_size
         num_kv_buffers = 1
@@ -284,6 +319,15 @@ class ElasticBlockPoolPatch(VersionAwarePatch, BasePatch):
                 self.kv_event_queue = []  # type: ignore[var-annotated]
 
                 from kvcached.integration.vllm.interfaces import get_kv_cache_manager
+
+                logger.info(
+                    "[kvcached-debug] ElasticBlockPool init: "
+                    f"num_gpu_blocks={num_gpu_blocks} "
+                    f"block_size={block_size} cell_size={cell_size} "
+                    f"block_mem_size={block_size * cell_size} "
+                    f"num_layers={num_layers} "
+                    f"num_kv_buffers={num_kv_buffers} "
+                    f"pool_bytes_per_layer={num_gpu_blocks * block_size * cell_size}")
 
                 self.kv_cache_manager = get_kv_cache_manager(
                     num_gpu_blocks, block_size, cell_size, num_layers,
@@ -623,16 +667,10 @@ class KVCacheCoordinatorPatch(VersionAwarePatch, BasePatch):
             kv_cache_spec = first_attn_group.kv_cache_spec
             block_size = kv_cache_spec.block_size
 
-            has_mamba = any(
-                _is_mamba_spec(g.kv_cache_spec)
-                for g in kv_cache_config.kv_cache_groups
-            )
+            attention_type = _infer_attention_type(kv_cache_config)
 
-            if has_mamba:
-                cell_size = kv_cache_spec.page_size_bytes // block_size
-                num_kv_buffers = 1
-            else:
-                cell_size, num_kv_buffers = _get_kv_cache_params(kv_cache_spec, block_size)
+            cell_size, num_kv_buffers = _get_kv_cache_params(
+                kv_cache_spec, block_size, attention_type=attention_type)
 
             try:
                 from vllm.distributed.parallel_state import get_tensor_model_parallel_world_size
@@ -659,12 +697,12 @@ class KVCacheCoordinatorPatch(VersionAwarePatch, BasePatch):
             block_pool_mod = importlib.import_module("vllm.v1.core.block_pool")
             ElasticBlockPool = getattr(block_pool_mod, "ElasticBlockPool")
 
-            num_layers = _get_group_size(kv_cache_config)
+            group_size = _get_group_size(kv_cache_config)
             self.block_pool = ElasticBlockPool(
                 kv_cache_config.num_blocks,
                 block_size,
                 cell_size=cell_size,
-                num_layers=num_layers,
+                num_layers=group_size,
                 enable_caching=getattr(self, "enable_caching", False),
                 num_kv_buffers=num_kv_buffers,
                 max_cached_blocks=_get_max_cached_blocks(block_size)
@@ -913,7 +951,6 @@ class GPUModelRunnerPatch(VersionAwarePatch, BasePatch):
 
         def _patched_initialize_kv_cache(self, kv_cache_config: Any) -> None:
             import torch
-            from vllm.v1.kv_cache_interface import MLAAttentionSpec
             from vllm.v1.utils import bind_kv_cache
 
             from kvcached.integration.vllm import interfaces as kvi
@@ -939,7 +976,7 @@ class GPUModelRunnerPatch(VersionAwarePatch, BasePatch):
             kv_cache_spec = kv_cache_config.kv_cache_groups[0].kv_cache_spec
             tensor_config = kv_cache_config.tensors[layer_name]
 
-            is_mla = isinstance(kv_cache_spec, MLAAttentionSpec)
+            attention_type = _infer_attention_type(kv_cache_config)
             dtype = kv_cache_spec.dtype
             num_blocks = tensor_config.size // kv_cache_spec.page_size_bytes
             assert num_blocks >= kv_cache_config.num_blocks
@@ -956,7 +993,7 @@ class GPUModelRunnerPatch(VersionAwarePatch, BasePatch):
                 dtype,
                 self.device.type,
                 num_layers,
-                attention_type="MLA" if is_mla else "MHA",
+                attention_type=attention_type,
                 kv_layout="NHD",
             )
             layer_id = 0
@@ -986,7 +1023,7 @@ class GPUModelRunnerPatch(VersionAwarePatch, BasePatch):
 
         def _allocate_kv_cache_from_kvcached(self, kv_cache_config):
             import torch
-            from vllm.v1.kv_cache_interface import KVCacheTensor, MLAAttentionSpec
+            from vllm.v1.kv_cache_interface import KVCacheTensor
 
             from kvcached.integration.vllm import interfaces as kvi
 
@@ -1026,7 +1063,7 @@ class GPUModelRunnerPatch(VersionAwarePatch, BasePatch):
                 return result
 
             kv_cache_spec = first_attn_group.kv_cache_spec
-            is_mla = isinstance(kv_cache_spec, MLAAttentionSpec)
+            attention_type = _infer_attention_type(kv_cache_config)
 
             first_layer_name = first_attn_group.layer_names[0]
             rep_tensor_cfg = layer_to_tensor_cfg[first_layer_name]
@@ -1064,11 +1101,6 @@ class GPUModelRunnerPatch(VersionAwarePatch, BasePatch):
                 kv_cache_spec.head_size,
             )
 
-            has_mamba = any(
-                _is_mamba_spec(g.kv_cache_spec)
-                for g in kv_cache_config.kv_cache_groups
-            )
-
             # Allocate group_size shared VM-backed pools, mirroring vLLM's
             # KVCacheTensor sharing: pool i is shared by layer i from each
             # group, and different groups use different block IDs within the
@@ -1077,19 +1109,29 @@ class GPUModelRunnerPatch(VersionAwarePatch, BasePatch):
             dtype = kv_cache_spec.dtype
             device_type = getattr(self, "device", torch.device("cuda")).type
 
+            # vLLM may split a virtual block (spec.block_size tokens) into
+            # ``ratio`` kernel-sized blocks; the attention zero kernel indexes
+            # by kernel-block stride. Forward kernel_block_size so we build the
+            # per-layer tensor at kernel granularity.
+            kernel_block_sizes = getattr(self, "_kernel_block_sizes", None)
+            kernel_block_size = (
+                kernel_block_sizes[first_attn_group_id]
+                if kernel_block_sizes is not None
+                and first_attn_group_id < len(kernel_block_sizes)
+                else None)
+
             alloc_result = kvi.alloc_kv_cache(
                 kv_cache_shape,
                 kv_cache_spec.block_size,
                 dtype,
                 device_type,
                 group_size,
-                attention_type="MLA" if is_mla else "MHA",
+                attention_type=attention_type,
                 kv_layout="NHD",
-                return_raw_buffers=has_mamba,
-                num_kv_buffers_override=1 if has_mamba else None,
+                kernel_block_size=kernel_block_size,
             )
 
-            if has_mamba:
+            if attention_type == "HYBRID_LINEAR":
                 kv_cache_raw_tensors, raw_info = alloc_result
                 self._kvcached_mamba_raw_info = raw_info
             else:
@@ -1136,8 +1178,6 @@ class GPUModelRunnerPatch(VersionAwarePatch, BasePatch):
             from vllm.utils.torch_utils import get_dtype_size
 
             kv_caches: dict[str, torch.Tensor] = {}
-            has_attn = False
-            has_mamba = False
 
             mamba_info = getattr(self, "_kvcached_mamba_raw_info", None)
 
@@ -1145,7 +1185,6 @@ class GPUModelRunnerPatch(VersionAwarePatch, BasePatch):
                 kv_cache_spec = kv_cache_group.kv_cache_spec
 
                 if _is_mamba_spec(kv_cache_spec):
-                    has_mamba = True
                     if mamba_info is None:
                         raise RuntimeError(
                             "Mamba layers found but no raw buffer info "
@@ -1163,13 +1202,8 @@ class GPUModelRunnerPatch(VersionAwarePatch, BasePatch):
                             )
                         kv_caches[layer_name] = state_tensors  # type: ignore[assignment]
                 else:
-                    has_attn = True
                     for pool_idx, layer_name in enumerate(kv_cache_group.layer_names):
                         kv_caches[layer_name] = kv_cache_raw_tensors[pool_idx]
-
-            if has_attn and has_mamba:
-                if hasattr(self, "_update_hybrid_attention_mamba_layout"):
-                    self._update_hybrid_attention_mamba_layout(kv_caches)
 
             return kv_caches
 

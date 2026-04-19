@@ -46,7 +46,7 @@ static inline size_t get_v_base_offset(const torch::Tensor &tensor) {
 FTensorAllocator::FTensorAllocator(const torch::Device &device,
                                    bool contiguous_layout)
     : dev_(device), num_layers_(0), contiguous_layout_(contiguous_layout),
-      kv_tensor_size_per_layer_(0) {
+      unified_pool_(false), kv_tensor_size_per_layer_(0) {
   if (dev_.is_cuda()) {
     init_cuda_();
   }
@@ -110,11 +110,12 @@ void FTensorAllocator::shutdown() {
 
 std::vector<torch::Tensor> FTensorAllocator::create_kv_tensors(
     size_t size, torch::Dtype dtype, const std::string &dev_str,
-    int64_t num_layers, int64_t num_kv_buffers) {
+    int64_t num_layers, int64_t num_kv_buffers, bool unified_pool) {
   std::lock_guard<std::mutex> lock(mtx_);
 
   assert(num_layers_ == 0 || num_layers_ == num_layers);
   num_layers_ = num_layers;
+  unified_pool_ = unified_pool;
   // Ensure size is aligned to page size.
   size_t aligned_size = size;
   if (size % kPageSize != 0) {
@@ -164,6 +165,16 @@ bool FTensorAllocator::map_to_kv_tensors(const std::vector<offset_t> &offsets) {
       // Map K and V regions for this block (covers all layers)
       ftensor->map(offset);
     }
+  } else if (unified_pool_) {
+    // Unified pool: K and V share a single block-interleaved FTensor per
+    // layer. Each page id maps exactly one VMM page at pid * page_size.
+    for (int64_t i = 0; i < num_layers_; i++) {
+      auto kv_name = std::string(kv_prefix) + std::to_string(i);
+      auto ftensor = ftensors_[kv_name].get();
+      for (auto offset : offsets) {
+        ftensor->map(offset);
+      }
+    }
   } else {
     // Original per-layer mapping
     for (int64_t i = 0; i < num_layers_; i++) {
@@ -203,6 +214,15 @@ bool FTensorAllocator::unmap_from_kv_tensors(
     for (auto offset : offsets) {
       // Unmap K and V regions for this block (covers all layers)
       ftensor->unmap(offset);
+    }
+  } else if (unified_pool_) {
+    // Unified pool: single unmap per pid.
+    for (int64_t i = 0; i < num_layers_; i++) {
+      auto kv_name = std::string(kv_prefix) + std::to_string(i);
+      auto ftensor = ftensors_[kv_name].get();
+      for (auto offset : offsets) {
+        ftensor->unmap(offset);
+      }
     }
   } else {
     // Original per-layer unmapping
