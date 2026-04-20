@@ -139,7 +139,13 @@ def alloc_kv_cache(
 
     if is_hybrid_linear and _contiguous_layout:
         raise ValueError(
-            "attention_type='HYBRID_LINEAR' is only supported with non-contiguous layout.")
+            "kvcached detected a hybrid linear-attention model "
+            "(e.g. Jamba/Bamba/NemotronH/Zamba2/Plamo2), which requires the "
+            "non-contiguous KV layout. Re-launch with "
+            "KVCACHED_CONTIGUOUS_LAYOUT=false. Also do NOT pass "
+            "--disable-hybrid-kv-cache-manager to vLLM for these models — "
+            "it only applies to attention-only hybrids like sliding-window "
+            "models (e.g. GPT-OSS).")
 
     num_k_or_v = 1 if is_mla else 2
 
