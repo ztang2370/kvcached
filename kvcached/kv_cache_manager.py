@@ -208,6 +208,13 @@ class KVCacheManager:
             if not self.avail_pages:
                 page = self.page_allocator.alloc_page()
                 page.init(self.block_mem_size)
+                # A page may have zero usable blocks when block_mem_size is
+                # large (e.g. HYBRID_LINEAR) and every aligned block would
+                # straddle the page boundary. Park it in full_pages so it's
+                # not re-handed-out but stays lookupable by free().
+                if page.num_free_blocks() == 0:
+                    self.full_pages[page.page_id] = page
+                    continue
                 self.num_avail_blocks += page.num_free_blocks()
             else:
                 _, page = self.avail_pages.popitem()

@@ -28,36 +28,76 @@ if TYPE_CHECKING:
         Request = Any  # type: ignore[misc,assignment]
 
 
+def _is_attention_spec(spec: Any) -> bool:
+    """Check if a KV cache spec is an attention-type spec."""
+    from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec, SlidingWindowSpec
+
+    return isinstance(spec, (FullAttentionSpec, SlidingWindowSpec, MLAAttentionSpec))
+
+
+def _is_mamba_spec(spec: Any) -> bool:
+    """Check if a KV cache spec is a MambaSpec."""
+    try:
+        from vllm.v1.kv_cache_interface import MambaSpec
+
+        return isinstance(spec, MambaSpec)
+    except ImportError:
+        return False
+
+
+def _get_first_attention_group(kv_cache_config: Any) -> Any:
+    """Return the first attention-type KV cache group, or None."""
+    for grp in kv_cache_config.kv_cache_groups:
+        if _is_attention_spec(grp.kv_cache_spec):
+            return grp
+    return None
+
+
+def _get_group_size(kv_cache_config: Any) -> int:
+    """Return the maximum number of layers across all KV cache groups.
+
+    This matches vLLM's shared memory pool count: ``group_size`` pools
+    are created, each shared by one layer from every group.
+    """
+    return max(len(g.layer_names) for g in kv_cache_config.kv_cache_groups)
+
+
 def _validate_kv_cache_groups(kv_cache_config: Any) -> None:
     """Validate KV cache groups for kvcached compatibility.
 
-    Checks that all groups use supported spec types (FullAttentionSpec,
-    SlidingWindowSpec, or MLAAttentionSpec) and that all groups share the
-    same block geometry (block_size and cell_size).  Raises ValueError on
-    mismatch.
+    Checks that all groups use supported spec types and that all attention
+    groups share the same block geometry (block_size and cell_size).
+    MambaSpec groups are accepted but not managed by kvcached.
+    Raises ValueError on mismatch.
     """
-    from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec, SlidingWindowSpec
-
-    supported = (FullAttentionSpec, SlidingWindowSpec, MLAAttentionSpec)
     kv_groups = kv_cache_config.kv_cache_groups
 
-    first_spec = kv_groups[0].kv_cache_spec
+    for idx, grp in enumerate(kv_groups):
+        grp_spec = grp.kv_cache_spec
+        if not _is_attention_spec(grp_spec) and not _is_mamba_spec(grp_spec):
+            raise ValueError(
+                f"kvcached only supports FullAttentionSpec, SlidingWindowSpec, "
+                f"MLAAttentionSpec, and MambaSpec, got {type(grp_spec).__name__} in group {idx}"
+            )
+
+    first_attn_group = _get_first_attention_group(kv_cache_config)
+    if first_attn_group is None:
+        return
+
+    first_spec = first_attn_group.kv_cache_spec
     block_size = first_spec.block_size
     cell_size, _ = _get_kv_cache_params(first_spec, block_size)
 
     for idx, grp in enumerate(kv_groups):
         grp_spec = grp.kv_cache_spec
-        if not isinstance(grp_spec, supported):
-            raise ValueError(
-                f"kvcached only supports FullAttentionSpec, SlidingWindowSpec, "
-                f"and MLAAttentionSpec, got {type(grp_spec).__name__} in group {idx}"
-            )
+        if not _is_attention_spec(grp_spec):
+            continue
         grp_block_size = grp_spec.block_size
         grp_cell_size, _ = _get_kv_cache_params(grp_spec, grp_block_size)
         if grp_block_size != block_size or grp_cell_size != cell_size:
             raise ValueError(
-                "kvcached requires all KV cache groups to have the "
-                f"same block geometry. Group 0: block_size={block_size},"
+                "kvcached requires all attention KV cache groups to have the "
+                f"same block geometry. First attention group: block_size={block_size},"
                 f" cell_size={cell_size}; group {idx}: "
                 f"block_size={grp_block_size}, cell_size={grp_cell_size}"
             )
@@ -68,12 +108,112 @@ def _count_kv_cache_layers(kv_cache_config: Any) -> int:
     return sum(len(g.layer_names) for g in kv_cache_config.kv_cache_groups)
 
 
+def _infer_attention_type(kv_cache_config: Any) -> str:
+    """Pick the kvcached attention_type for this KV cache config.
+
+    Returns one of: "MLA", "HYBRID_LINEAR", "MHA". HYBRID_LINEAR
+    requires both a FullAttentionSpec group and a linear-attention
+    (mamba/SSM) group to be present.
+    """
+    from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec
+
+    has_full_attn = False
+    has_mla = False
+    has_mamba = False
+    for grp in kv_cache_config.kv_cache_groups:
+        spec = grp.kv_cache_spec
+        if isinstance(spec, MLAAttentionSpec):
+            has_mla = True
+        elif isinstance(spec, FullAttentionSpec):
+            has_full_attn = True
+        elif _is_mamba_spec(spec):
+            has_mamba = True
+
+    if has_mla:
+        return "MLA"
+    if has_full_attn and has_mamba:
+        return "HYBRID_LINEAR"
+    return "MHA"
+
+
 def _should_enable_async_sched(vllm_config: Any) -> bool:
     """Enable kvcached async scheduling whenever vLLM async scheduling is on."""
     if vllm_config is None:
         return False
     scheduler_config = getattr(vllm_config, "scheduler_config", None)
     return bool(getattr(scheduler_config, "async_scheduling", False))
+
+
+def _reshape_mamba_non_contiguous(
+    raw_int8: Any, kv_cache_spec: Any, get_dtype_size: Any,
+) -> list:
+    """Create strided mamba state views from a per-pool flat int8 buffer.
+
+    Mirrors vLLM's native ``_reshape_kv_cache_tensors`` for MambaSpec:
+    the raw int8 buffer is reinterpreted via ``torch.as_strided`` into
+    the shapes/dtypes declared by the spec.
+    """
+    import torch
+
+    raw_tensor = raw_int8
+    num_blocks = raw_tensor.numel() // kv_cache_spec.page_size_bytes
+    state_tensors: list = []
+    storage_offset_bytes = 0
+    for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
+        dtype_size = get_dtype_size(dtype)
+        num_element_per_page = kv_cache_spec.page_size_bytes // dtype_size
+        target_shape = (num_blocks, *shape)
+        stride = torch.empty(target_shape).stride()
+        target_stride = (num_element_per_page, *stride[1:])
+        assert storage_offset_bytes % dtype_size == 0
+        tensor = torch.as_strided(
+            raw_tensor.view(dtype),
+            size=target_shape,
+            stride=target_stride,
+            storage_offset=storage_offset_bytes // dtype_size,
+        )
+        state_tensors.append(tensor)
+        storage_offset_bytes += stride[0] * dtype_size
+    return state_tensors
+
+
+def _reshape_mamba_contiguous(
+    mamba_info: dict, kv_cache_spec: Any, pool_idx: int, get_dtype_size: Any,
+) -> list:
+    """Create strided mamba state views from a contiguous interleaved buffer.
+
+    In contiguous layout, block N for pool L sits at byte offset
+    ``(N * num_pools + L) * page_size_bytes`` inside the single base
+    buffer.  The inter-block stride is therefore
+    ``num_pools * page_size_bytes`` bytes, not ``page_size_bytes``.
+    """
+    import torch
+
+    base_buffer = mamba_info["buffers"][0]  # flat int8 buffer
+    num_blocks = mamba_info["num_blocks"]
+    page_size_bytes = mamba_info["page_size_bytes"]
+    block_stride_bytes = mamba_info["block_stride_bytes"]
+
+    layer_offset_bytes = pool_idx * page_size_bytes
+
+    state_tensors: list = []
+    inner_offset_bytes = 0
+    for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
+        dtype_size = get_dtype_size(dtype)
+        block_stride_elems = block_stride_bytes // dtype_size
+        target_shape = (num_blocks, *shape)
+        inner_stride = torch.empty(target_shape).stride()
+        target_stride = (block_stride_elems, *inner_stride[1:])
+        storage_offset = (layer_offset_bytes + inner_offset_bytes) // dtype_size
+        tensor = torch.as_strided(
+            base_buffer.view(dtype),
+            size=target_shape,
+            stride=target_stride,
+            storage_offset=storage_offset,
+        )
+        state_tensors.append(tensor)
+        inner_offset_bytes += inner_stride[0] * dtype_size
+    return state_tensors
 
 
 # Version ranges for vLLM support
@@ -84,7 +224,11 @@ VLLM_V10_RANGE = ">0.9.2"  # vLLM 0.10.x+ versions, need to cover 0.10.0rc1
 VLLM_ALL_RANGE = ">=0.8.4"  # All supported versions
 
 
-def _get_kv_cache_params(kv_cache_spec: Any, block_size: int) -> tuple:
+def _get_kv_cache_params(
+    kv_cache_spec: Any,
+    block_size: int,
+    attention_type: str = "MHA",
+) -> tuple:
     """Determine cell_size and num_kv_buffers from a KV cache spec.
 
     Returns:
@@ -92,8 +236,11 @@ def _get_kv_cache_params(kv_cache_spec: Any, block_size: int) -> tuple:
     """
     from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
-    if isinstance(kv_cache_spec, MLAAttentionSpec):
+    if attention_type in ("MLA", "HYBRID_LINEAR") or isinstance(kv_cache_spec, MLAAttentionSpec):
         # MLA: single combined KV buffer per layer
+        # HYBRID_LINEAR (full attention + linear attention): K and V are
+        # interleaved into one buffer per layer, so it shares MLA's
+        # single-buffer math.
         # page_size_bytes = block_size * num_kv_heads * head_size * dtype_size
         cell_size = kv_cache_spec.page_size_bytes // block_size
         num_kv_buffers = 1
@@ -503,12 +650,20 @@ class KVCacheCoordinatorPatch(VersionAwarePatch, BasePatch):
 
             _validate_kv_cache_groups(kv_cache_config)
 
-            # All groups validated to share the same block geometry,
-            # so group 0's spec is representative.
-            kv_cache_spec = kv_cache_config.kv_cache_groups[0].kv_cache_spec
+            first_attn_group = _get_first_attention_group(kv_cache_config)
+            if first_attn_group is None:
+                raise RuntimeError(
+                    "kvcached is enabled but the KV cache config contains no "
+                    "attention groups; nothing to manage."
+                )
+
+            kv_cache_spec = first_attn_group.kv_cache_spec
             block_size = kv_cache_spec.block_size
 
-            cell_size, num_kv_buffers = _get_kv_cache_params(kv_cache_spec, block_size)
+            attention_type = _infer_attention_type(kv_cache_config)
+
+            cell_size, num_kv_buffers = _get_kv_cache_params(
+                kv_cache_spec, block_size, attention_type=attention_type)
 
             try:
                 from vllm.distributed.parallel_state import get_tensor_model_parallel_world_size
@@ -535,12 +690,12 @@ class KVCacheCoordinatorPatch(VersionAwarePatch, BasePatch):
             block_pool_mod = importlib.import_module("vllm.v1.core.block_pool")
             ElasticBlockPool = getattr(block_pool_mod, "ElasticBlockPool")
 
-            num_layers = _count_kv_cache_layers(kv_cache_config)
+            group_size = _get_group_size(kv_cache_config)
             self.block_pool = ElasticBlockPool(
                 kv_cache_config.num_blocks,
                 block_size,
                 cell_size=cell_size,
-                num_layers=num_layers,
+                num_layers=group_size,
                 enable_caching=getattr(self, "enable_caching", False),
                 num_kv_buffers=num_kv_buffers,
                 max_cached_blocks=_get_max_cached_blocks(block_size)
@@ -789,7 +944,6 @@ class GPUModelRunnerPatch(VersionAwarePatch, BasePatch):
 
         def _patched_initialize_kv_cache(self, kv_cache_config: Any) -> None:
             import torch
-            from vllm.v1.kv_cache_interface import MLAAttentionSpec
             from vllm.v1.utils import bind_kv_cache
 
             from kvcached.integration.vllm import interfaces as kvi
@@ -815,7 +969,7 @@ class GPUModelRunnerPatch(VersionAwarePatch, BasePatch):
             kv_cache_spec = kv_cache_config.kv_cache_groups[0].kv_cache_spec
             tensor_config = kv_cache_config.tensors[layer_name]
 
-            is_mla = isinstance(kv_cache_spec, MLAAttentionSpec)
+            attention_type = _infer_attention_type(kv_cache_config)
             dtype = kv_cache_spec.dtype
             num_blocks = tensor_config.size // kv_cache_spec.page_size_bytes
             assert num_blocks >= kv_cache_config.num_blocks
@@ -832,7 +986,7 @@ class GPUModelRunnerPatch(VersionAwarePatch, BasePatch):
                 dtype,
                 self.device.type,
                 num_layers,
-                attention_type="MLA" if is_mla else "MHA",
+                attention_type=attention_type,
                 kv_layout="NHD",
             )
             layer_id = 0
@@ -862,18 +1016,11 @@ class GPUModelRunnerPatch(VersionAwarePatch, BasePatch):
 
         def _allocate_kv_cache_from_kvcached(self, kv_cache_config):
             import torch
-            from vllm.v1.kv_cache_interface import KVCacheTensor, MLAAttentionSpec
+            from vllm.v1.kv_cache_interface import KVCacheTensor
 
             from kvcached.integration.vllm import interfaces as kvi
 
             _validate_kv_cache_groups(kv_cache_config)
-
-            # All groups validated to share the same block geometry by
-            # _validate_kv_cache_groups, so group 0's spec is representative.
-            first_kv_cache_group = kv_cache_config.kv_cache_groups[0]
-            kv_cache_spec = first_kv_cache_group.kv_cache_spec
-
-            is_mla = isinstance(kv_cache_spec, MLAAttentionSpec)
 
             layer_to_tensor_cfg: dict[str, KVCacheTensor] = {}
             for tensor_cfg in kv_cache_config.kv_cache_tensors:
@@ -895,12 +1042,31 @@ class GPUModelRunnerPatch(VersionAwarePatch, BasePatch):
                         "kv_cache_config.num_blocks"
                     )
 
-            first_layer_name = first_kv_cache_group.layer_names[0]
+            first_attn_group_id = None
+            first_attn_group = None
+            for idx, grp in enumerate(kv_cache_config.kv_cache_groups):
+                if _is_attention_spec(grp.kv_cache_spec):
+                    first_attn_group_id = idx
+                    first_attn_group = grp
+                    break
+
+            if first_attn_group is None or first_attn_group_id is None:
+                raise RuntimeError(
+                    "kvcached is enabled but the KV cache config contains no "
+                    "attention groups; nothing to allocate."
+                )
+
+            kv_cache_spec = first_attn_group.kv_cache_spec
+            attention_type = _infer_attention_type(kv_cache_config)
+
+            first_layer_name = first_attn_group.layer_names[0]
             rep_tensor_cfg = layer_to_tensor_cfg[first_layer_name]
             num_blocks = rep_tensor_cfg.size // kv_cache_spec.page_size_bytes
 
             # Use version-aware attention backend access
-            attn_backend_cls = patch_instance._get_version_specific_attention_backend(self)
+            attn_backend_cls = patch_instance._get_version_specific_attention_backend(
+                self, kv_cache_group_id=first_attn_group_id
+            )
 
             backend_name = (
                 attn_backend_cls.get_name() if hasattr(attn_backend_cls, "get_name")
@@ -929,19 +1095,44 @@ class GPUModelRunnerPatch(VersionAwarePatch, BasePatch):
                 kv_cache_spec.head_size,
             )
 
-            num_layers = _count_kv_cache_layers(kv_cache_config)
+            # Allocate group_size shared VM-backed pools, mirroring vLLM's
+            # KVCacheTensor sharing: pool i is shared by layer i from each
+            # group, and different groups use different block IDs within the
+            # same pool.
+            group_size = _get_group_size(kv_cache_config)
             dtype = kv_cache_spec.dtype
             device_type = getattr(self, "device", torch.device("cuda")).type
 
-            kv_cache_raw_tensors = kvi.alloc_kv_cache(
+            # vLLM may split a virtual block (spec.block_size tokens) into
+            # ``ratio`` kernel-sized blocks; the attention zero kernel indexes
+            # by kernel-block stride. Forward kernel_block_size so we build the
+            # per-layer tensor at kernel granularity.
+            kernel_block_sizes = getattr(self, "_kernel_block_sizes", None)
+            kernel_block_size = (
+                kernel_block_sizes[first_attn_group_id]
+                if kernel_block_sizes is not None
+                and first_attn_group_id < len(kernel_block_sizes)
+                else None)
+
+            alloc_result = kvi.alloc_kv_cache(
                 kv_cache_shape,
                 kv_cache_spec.block_size,
                 dtype,
                 device_type,
-                num_layers,
-                attention_type="MLA" if is_mla else "MHA",
+                group_size,
+                attention_type=attention_type,
                 kv_layout="NHD",
+                kernel_block_size=kernel_block_size,
             )
+
+            if attention_type == "HYBRID_LINEAR":
+                kv_cache_raw_tensors, raw_info = alloc_result
+                self._kvcached_mamba_raw_info = raw_info
+            else:
+                kv_cache_raw_tensors = alloc_result
+
+            # Return the list of pool tensors directly; the layer-name
+            # mapping is done in _reshape_kv_cache_tensors_from_kvcached.
             return kv_cache_raw_tensors
 
         setattr(
@@ -978,13 +1169,36 @@ class GPUModelRunnerPatch(VersionAwarePatch, BasePatch):
             self, kv_cache_config, kv_cache_raw_tensors, *args: Any, **kwargs: Any
         ):
             import torch
+            from vllm.utils.torch_utils import get_dtype_size
 
             kv_caches: dict[str, torch.Tensor] = {}
-            layer_id = 0
+
+            mamba_info = getattr(self, "_kvcached_mamba_raw_info", None)
+
             for kv_cache_group in kv_cache_config.kv_cache_groups:
-                for layer_name in kv_cache_group.layer_names:
-                    kv_caches[layer_name] = kv_cache_raw_tensors[layer_id]
-                    layer_id += 1
+                kv_cache_spec = kv_cache_group.kv_cache_spec
+
+                if _is_mamba_spec(kv_cache_spec):
+                    if mamba_info is None:
+                        raise RuntimeError(
+                            "Mamba layers found but no raw buffer info "
+                            "available from kvcached"
+                        )
+                    for pool_idx, layer_name in enumerate(kv_cache_group.layer_names):
+                        if mamba_info["is_contiguous"]:
+                            state_tensors = _reshape_mamba_contiguous(
+                                mamba_info, kv_cache_spec, pool_idx, get_dtype_size,
+                            )
+                        else:
+                            state_tensors = _reshape_mamba_non_contiguous(
+                                mamba_info["buffers"][pool_idx],
+                                kv_cache_spec, get_dtype_size,
+                            )
+                        kv_caches[layer_name] = state_tensors  # type: ignore[assignment]
+                else:
+                    for pool_idx, layer_name in enumerate(kv_cache_group.layer_names):
+                        kv_caches[layer_name] = kv_cache_raw_tensors[pool_idx]
+
             return kv_caches
 
         setattr(
@@ -1016,19 +1230,21 @@ class GPUModelRunnerPatch(VersionAwarePatch, BasePatch):
         return True
 
     # Version-specific helper methods for attention backend access
-    def get_attention_backend_v8(self, model_runner_instance):
+    def get_attention_backend_v8(self, model_runner_instance, kv_cache_group_id=0):
         """Get attention backend for vLLM 0.8.x versions"""
         return model_runner_instance.attn_backend
 
-    def get_attention_backend_v9(self, model_runner_instance):
+    def get_attention_backend_v9(self, model_runner_instance, kv_cache_group_id=0):
         """Get attention backend for vLLM 0.9.x versions"""
-        return model_runner_instance.attn_backends[0]
+        return model_runner_instance.attn_backends[kv_cache_group_id]
 
-    def get_attention_backend_v10(self, model_runner_instance):
+    def get_attention_backend_v10(self, model_runner_instance, kv_cache_group_id=0):
         """Get attention backend for vLLM 0.10.x+ versions"""
-        return model_runner_instance.attn_groups[0][0].backend
+        return model_runner_instance.attn_groups[kv_cache_group_id][0].backend
 
-    def _get_version_specific_attention_backend(self, model_runner_instance):
+    def _get_version_specific_attention_backend(
+        self, model_runner_instance, kv_cache_group_id=0
+    ):
         """Get the appropriate attention backend based on detected version"""
         if not self.detected_version:
             raise ValueError("vLLM version not detected")
@@ -1039,11 +1255,11 @@ class GPUModelRunnerPatch(VersionAwarePatch, BasePatch):
         v10_range = VersionRange(VLLM_V10_RANGE)
 
         if v10_range.contains(self.detected_version):
-            return self.get_attention_backend_v10(model_runner_instance)
+            return self.get_attention_backend_v10(model_runner_instance, kv_cache_group_id)
         elif v9_range.contains(self.detected_version):
-            return self.get_attention_backend_v9(model_runner_instance)
+            return self.get_attention_backend_v9(model_runner_instance, kv_cache_group_id)
         elif v8_range.contains(self.detected_version):
-            return self.get_attention_backend_v8(model_runner_instance)
+            return self.get_attention_backend_v8(model_runner_instance, kv_cache_group_id)
         else:
             raise ValueError(f"Unsupported vLLM version: {self.detected_version}")
 
