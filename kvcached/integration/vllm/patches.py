@@ -905,7 +905,7 @@ class GPUModelRunnerPatch(VersionAwarePatch, BasePatch):
             backend_name = (
                 attn_backend_cls.get_name() if hasattr(attn_backend_cls, "get_name")
                 else str(attn_backend_cls)
-            )
+            ).upper()
             if backend_name == "FLASHINFER":
                 required_layout = None
                 if hasattr(attn_backend_cls, "get_required_kv_cache_layout"):
