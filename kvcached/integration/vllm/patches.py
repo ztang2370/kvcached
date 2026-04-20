@@ -320,15 +320,6 @@ class ElasticBlockPoolPatch(VersionAwarePatch, BasePatch):
 
                 from kvcached.integration.vllm.interfaces import get_kv_cache_manager
 
-                logger.info(
-                    "[kvcached-debug] ElasticBlockPool init: "
-                    f"num_gpu_blocks={num_gpu_blocks} "
-                    f"block_size={block_size} cell_size={cell_size} "
-                    f"block_mem_size={block_size * cell_size} "
-                    f"num_layers={num_layers} "
-                    f"num_kv_buffers={num_kv_buffers} "
-                    f"pool_bytes_per_layer={num_gpu_blocks * block_size * cell_size}")
-
                 self.kv_cache_manager = get_kv_cache_manager(
                     num_gpu_blocks, block_size, cell_size, num_layers,
                     num_kv_buffers=num_kv_buffers)
