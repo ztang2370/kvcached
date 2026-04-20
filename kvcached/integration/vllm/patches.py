@@ -652,8 +652,10 @@ class KVCacheCoordinatorPatch(VersionAwarePatch, BasePatch):
 
             first_attn_group = _get_first_attention_group(kv_cache_config)
             if first_attn_group is None:
-                logger.warning("No attention groups found; kvcached has nothing to manage")
-                return
+                raise RuntimeError(
+                    "kvcached is enabled but the KV cache config contains no "
+                    "attention groups; nothing to manage."
+                )
 
             kv_cache_spec = first_attn_group.kv_cache_spec
             block_size = kv_cache_spec.block_size
@@ -1040,8 +1042,6 @@ class GPUModelRunnerPatch(VersionAwarePatch, BasePatch):
                         "kv_cache_config.num_blocks"
                     )
 
-            result: dict[str, torch.Tensor] = {}
-
             first_attn_group_id = None
             first_attn_group = None
             for idx, grp in enumerate(kv_cache_config.kv_cache_groups):
@@ -1050,8 +1050,11 @@ class GPUModelRunnerPatch(VersionAwarePatch, BasePatch):
                     first_attn_group = grp
                     break
 
-            if first_attn_group is None:
-                return result
+            if first_attn_group is None or first_attn_group_id is None:
+                raise RuntimeError(
+                    "kvcached is enabled but the KV cache config contains no "
+                    "attention groups; nothing to allocate."
+                )
 
             kv_cache_spec = first_attn_group.kv_cache_spec
             attention_type = _infer_attention_type(kv_cache_config)
