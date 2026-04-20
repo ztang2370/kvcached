@@ -901,6 +901,27 @@ class GPUModelRunnerPatch(VersionAwarePatch, BasePatch):
 
             # Use version-aware attention backend access
             attn_backend_cls = patch_instance._get_version_specific_attention_backend(self)
+
+            backend_name = (
+                attn_backend_cls.get_name() if hasattr(attn_backend_cls, "get_name")
+                else str(attn_backend_cls)
+            ).upper()
+            if backend_name == "FLASHINFER":
+                required_layout = None
+                if hasattr(attn_backend_cls, "get_required_kv_cache_layout"):
+                    required_layout = attn_backend_cls.get_required_kv_cache_layout()
+
+                selected_layout = required_layout or "NHD"
+                if selected_layout != "NHD":
+                    raise RuntimeError(
+                        "kvcached currently supports NHD KV layout only, but "
+                        f"{backend_name} requires {selected_layout}."
+                    )
+
+                from vllm.v1.attention.backends.utils import set_kv_cache_layout
+
+                set_kv_cache_layout(selected_layout)
+
             kv_cache_shape = attn_backend_cls.get_kv_cache_shape(
                 num_blocks,
                 kv_cache_spec.block_size,
