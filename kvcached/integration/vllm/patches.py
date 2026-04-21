@@ -29,10 +29,22 @@ if TYPE_CHECKING:
 
 
 def _is_attention_spec(spec: Any) -> bool:
-    """Check if a KV cache spec is an attention-type spec."""
-    from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec, SlidingWindowSpec
+    """Check if a KV cache spec is an attention-type spec.
 
-    return isinstance(spec, (FullAttentionSpec, SlidingWindowSpec, MLAAttentionSpec))
+    MLAAttentionSpec only exists in vLLM >=0.11.0. Older versions express MLA
+    as FullAttentionSpec(use_mla=True), which still matches FullAttentionSpec
+    here, so resolving MLAAttentionSpec dynamically is sufficient.
+    """
+    from vllm.v1 import kv_cache_interface
+
+    candidates = tuple(
+        cls for cls in (
+            getattr(kv_cache_interface, name, None)
+            for name in ("FullAttentionSpec", "SlidingWindowSpec", "MLAAttentionSpec")
+        )
+        if isinstance(cls, type)
+    )
+    return isinstance(spec, candidates)
 
 
 def _is_mamba_spec(spec: Any) -> bool:
@@ -114,15 +126,20 @@ def _infer_attention_type(kv_cache_config: Any) -> str:
     Returns one of: "MLA", "HYBRID_LINEAR", "MHA". HYBRID_LINEAR
     requires both a FullAttentionSpec group and a linear-attention
     (mamba/SSM) group to be present.
+
+    Uses `_is_mla_kv_cache_spec` for MLA detection so this works on vLLM
+    versions that express MLA via `use_mla=True` on FullAttentionSpec
+    (pre-0.11.0) as well as via the dedicated MLAAttentionSpec class
+    (0.11.0+).
     """
-    from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec
+    from vllm.v1.kv_cache_interface import FullAttentionSpec
 
     has_full_attn = False
     has_mla = False
     has_mamba = False
     for grp in kv_cache_config.kv_cache_groups:
         spec = grp.kv_cache_spec
-        if isinstance(spec, MLAAttentionSpec):
+        if _is_mla_kv_cache_spec(spec):
             has_mla = True
         elif isinstance(spec, FullAttentionSpec):
             has_full_attn = True
@@ -234,9 +251,7 @@ def _get_kv_cache_params(
     Returns:
         (cell_size, num_kv_buffers)
     """
-    from vllm.v1.kv_cache_interface import MLAAttentionSpec
-
-    if attention_type in ("MLA", "HYBRID_LINEAR") or isinstance(kv_cache_spec, MLAAttentionSpec):
+    if attention_type in ("MLA", "HYBRID_LINEAR") or _is_mla_kv_cache_spec(kv_cache_spec):
         # MLA: single combined KV buffer per layer
         # HYBRID_LINEAR (full attention + linear attention): K and V are
         # interleaved into one buffer per layer, so it shares MLA's
@@ -250,6 +265,21 @@ def _get_kv_cache_params(
         cell_size = kv_cache_spec.page_size_bytes // block_size // 2
         num_kv_buffers = 2
     return cell_size, num_kv_buffers
+
+
+def _is_mla_kv_cache_spec(kv_cache_spec: Any) -> bool:
+    """Return whether this KV cache spec should use MLA layout.
+
+    Some vLLM versions mark MLA via `use_mla` on generic attention specs,
+    while others expose `MLAAttentionSpec`.
+    """
+    if getattr(kv_cache_spec, "use_mla", False):
+        return True
+    try:
+        from vllm.v1.kv_cache_interface import MLAAttentionSpec
+    except ImportError:
+        return False
+    return isinstance(kv_cache_spec, MLAAttentionSpec)
 
 
 def _get_max_cached_blocks(block_size: int) -> int:
@@ -359,48 +389,96 @@ class ElasticBlockPoolPatch(VersionAwarePatch, BasePatch):
             def get_cached_block(
                 self,
                 block_hash: Any,
-                kv_cache_group_ids: list[int]
-            ) -> Optional[list["KVCacheBlock"]]:
+                kv_cache_group_ids: Optional[Iterable[int]] = None,
+            ) -> Optional[Any]:
                 if not self.enable_prefix_cache:
                     return None
 
+                # Backward compatibility:
+                # - Older vLLM versions call get_cached_block(block_hash)
+                #   and expect a single KVCacheBlock.
+                # - Newer hybrid-attention paths pass multiple group ids and
+                #   expect one block per group.
+                if kv_cache_group_ids is None:
+                    key = self._make_cache_key(block_hash, 0)
+                    return self._cached_blocks.get(key)
+                if isinstance(kv_cache_group_ids, int):
+                    kv_cache_group_ids = [int(kv_cache_group_ids)]
+
                 cached_blocks: list["KVCacheBlock"] = []
                 for group_id in kv_cache_group_ids:
-                    key = self._make_cache_key(block_hash, group_id)
+                    key = self._make_cache_key(block_hash, int(group_id))
                     block = self._cached_blocks.get(key)
                     if block is None:
                         # Atomic: all groups must hit or return None
                         return None
                     cached_blocks.append(block)
+                if not cached_blocks:
+                    return None
                 return cached_blocks
 
             def cache_full_blocks(
                 self,
                 request: "Request",
                 blocks: list["KVCacheBlock"],
-                num_cached_blocks: int,
-                num_full_blocks: int,
-                block_size: int,
-                kv_cache_group_id: int,
+                *args: Any,
+                **kwargs: Any,
             ) -> None:
                 if not self.enable_prefix_cache:
                     return
+
+                # Compatibility with vLLM call signatures across versions:
+                # - (request, blocks, num_cached_blocks, num_full_blocks, block_size[, kv_cache_group_id])
+                # - (request, blocks, block_hashes, num_cached_blocks, num_full_blocks, block_size[, kv_cache_group_id], hash_fn)
+                # - keyword variants containing block_hashes/hash_fn.
+                block_hashes = kwargs.pop("block_hashes", None)
+                num_cached_blocks = kwargs.pop("num_cached_blocks", None)
+                num_full_blocks = kwargs.pop("num_full_blocks", None)
+                _block_size = kwargs.pop("block_size", None)
+                kv_cache_group_id = kwargs.pop("kv_cache_group_id", 0)
+                _hash_fn = kwargs.pop("hash_fn", None)
+
+                remaining_args = list(args)
+                if block_hashes is None and remaining_args and isinstance(remaining_args[0], (list, tuple)):
+                    block_hashes = remaining_args.pop(0)
+
+                if num_cached_blocks is None and remaining_args:
+                    num_cached_blocks = remaining_args.pop(0)
+                if num_full_blocks is None and remaining_args:
+                    num_full_blocks = remaining_args.pop(0)
+                if _block_size is None and remaining_args:
+                    _block_size = remaining_args.pop(0)
+                if remaining_args and isinstance(remaining_args[0], int):
+                    kv_cache_group_id = remaining_args.pop(0)
+                if remaining_args:
+                    # Final positional argument is typically hash_fn; ignored.
+                    _hash_fn = remaining_args.pop(0)
+
+                if num_cached_blocks is None or num_full_blocks is None:
+                    raise TypeError(
+                        "cache_full_blocks requires num_cached_blocks and num_full_blocks"
+                    )
+                num_cached_blocks = int(num_cached_blocks)
+                num_full_blocks = int(num_full_blocks)
+                kv_cache_group_id = int(kv_cache_group_id)
 
                 if num_cached_blocks >= num_full_blocks:
                     return
 
                 new_full_blocks = blocks[num_cached_blocks:num_full_blocks]
 
-                assert hasattr(request, 'block_hashes'), "Request missing block_hashes attribute"
-                assert len(request.block_hashes) >= num_full_blocks, \
-                    f"Request has {len(request.block_hashes)} hashes but need {num_full_blocks}"
+                if block_hashes is None:
+                    assert hasattr(request, "block_hashes"), "Request missing block_hashes attribute"
+                    block_hashes = request.block_hashes
+                assert len(block_hashes) >= num_full_blocks, \
+                    f"Request has {len(block_hashes)} hashes but need {num_full_blocks}"
 
                 for i, block in enumerate(new_full_blocks):
-                    if hasattr(block, 'is_null') and block.is_null:
+                    if getattr(block, "is_null", False):
                         continue
 
                     block_idx = num_cached_blocks + i
-                    block_hash = request.block_hashes[block_idx]
+                    block_hash = block_hashes[block_idx]
                     key = self._make_cache_key(block_hash, kv_cache_group_id)
 
                     # Already cached, idempotent
@@ -468,7 +546,7 @@ class ElasticBlockPoolPatch(VersionAwarePatch, BasePatch):
                     block_ids = [
                         block.block_id
                         for block in ordered_blocks
-                        if block is not None and not block.is_null
+                        if block is not None and not getattr(block, "is_null", False)
                     ]
                     if block_ids:
                         self.kv_cache_manager.free(block_ids)
@@ -476,7 +554,7 @@ class ElasticBlockPoolPatch(VersionAwarePatch, BasePatch):
 
                 uncached_to_free: list[int] = []
                 for block in ordered_blocks:
-                    if block is None or block.is_null:
+                    if block is None or getattr(block, "is_null", False):
                         continue
                     block.ref_cnt -= 1
                     if block.ref_cnt == 0:
