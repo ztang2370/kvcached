@@ -23,16 +23,15 @@ void shutdown_kvcached() {
   FTensorAllocator::shutdown();
 }
 
-std::vector<torch::Tensor> create_kv_tensors(size_t size, size_t dtype_size,
-                                             const std::string &dev_str,
-                                             int64_t num_layers,
-                                             int64_t num_kv_buffers = 2,
-                                             int64_t group_id = 0) {
+std::vector<torch::Tensor>
+create_kv_tensors(size_t size, size_t dtype_size, const std::string &dev_str,
+                  int64_t num_layers, int64_t num_kv_buffers = 2,
+                  int64_t group_id = 0, bool unified_pool = false) {
   py::gil_scoped_release release;
   auto allocator = FTensorAllocator::global_allocator(group_id);
   auto dtype_ = torch_dtype_from_size(dtype_size);
   return allocator->create_kv_tensors(size, dtype_, dev_str, num_layers,
-                                      num_kv_buffers);
+                                      num_kv_buffers, unified_pool);
 }
 
 bool kv_tensors_created(int64_t group_id = 0) {
@@ -67,7 +66,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("create_kv_tensors", &kvcached::create_kv_tensors, "create_kv_tensors",
         py::arg("size"), py::arg("dtype_size"), py::arg("dev_str"),
         py::arg("num_layers"), py::arg("num_kv_buffers") = 2,
-        py::arg("group_id") = 0);
+        py::arg("group_id") = 0, py::arg("unified_pool") = false);
   m.def("kv_tensors_created", &kvcached::kv_tensors_created,
         "kv_tensors_created", py::arg("group_id") = 0);
   m.def("map_to_kv_tensors", &kvcached::map_to_kv_tensors, "map_to_kv_tensors",

@@ -137,11 +137,24 @@ def alloc_kv_cache(
     k_tensors, v_tensors = [], []
 
     if not _contiguous_layout:
-        num_eles = num_k_or_v * math.prod(actual_kvcache_shape)
+        # In the per-layer FTensors, K occupies [0, v_offset) and V
+        # occupies [v_offset, 2*v_offset) where v_offset equals
+        # gpu_mem_bytes_per_layer_k_or_v.  A plain contiguous view would
+        # place V at num_blocks_per_layer * block_mem_size, which differs
+        # from v_offset when block_mem_size does not evenly divide
+        # gpu_mem_bytes_per_layer_k_or_v.  Use as_strided so the K/V
+        # dimension stride matches the real V offset.
+        v_offset_eles = gpu_mem_bytes_per_layer_k_or_v // dtype.itemsize
+        kv_shape = [num_k_or_v] + list(actual_kvcache_shape)
+        strides = [0] * len(kv_shape)
+        strides[-1] = 1
+        for i in range(len(kv_shape) - 2, 0, -1):
+            strides[i] = strides[i + 1] * kv_shape[i + 1]
+        strides[0] = v_offset_eles
         for t in raw_kv_tensors:
-            t = t.view(dtype=dtype)[:num_eles].view(num_k_or_v, *actual_kvcache_shape)
-            k_tensors.append(t.narrow(0, 0, 1).view(actual_kvcache_shape))
-            v_tensors.append(t.narrow(0, 1, 1).view(actual_kvcache_shape))
+            kv = torch.as_strided(t.view(dtype=dtype), kv_shape, strides)
+            k_tensors.append(kv[0])
+            v_tensors.append(kv[1])
     else:
         contiguous_shape = (num_tokens, num_layers, num_k_or_v, *actual_kvcache_shape[1:])
         num_eles = math.prod(contiguous_shape)
