@@ -37,17 +37,20 @@ def _validate_kv_cache_groups(kv_cache_config: Any) -> None:
     """
     from vllm.v1 import kv_cache_interface
 
+    # NOTE: Intentionally exclude the base class `AttentionSpec` so newer
+    # subclasses (ChunkedLocalAttentionSpec, EncoderOnlyAttentionSpec,
+    # CrossAttentionSpec, ...) are not silently accepted. Pre-0.11.0 MLA is
+    # expressed as FullAttentionSpec(use_mla=True), so FullAttentionSpec alone
+    # covers it; post-0.11.0 exposes a dedicated MLAAttentionSpec class.
     supported_names = (
         "FullAttentionSpec",
         "SlidingWindowSpec",
         "MLAAttentionSpec",
-        "AttentionSpec",
     )
     supported: tuple[type[Any], ...] = tuple(
-        dict.fromkeys(
-            cls for cls in
-            (getattr(kv_cache_interface, name, None) for name in supported_names)
-            if isinstance(cls, type))
+        cls for cls in
+        (getattr(kv_cache_interface, name, None) for name in supported_names)
+        if isinstance(cls, type)
     )
     kv_groups = kv_cache_config.kv_cache_groups
 
@@ -121,7 +124,7 @@ def _is_mla_kv_cache_spec(kv_cache_spec: Any) -> bool:
     Some vLLM versions mark MLA via `use_mla` on generic attention specs,
     while others expose `MLAAttentionSpec`.
     """
-    if bool(getattr(kv_cache_spec, "use_mla", False)):
+    if getattr(kv_cache_spec, "use_mla", False):
         return True
     try:
         from vllm.v1.kv_cache_interface import MLAAttentionSpec
@@ -322,7 +325,7 @@ class ElasticBlockPoolPatch(VersionAwarePatch, BasePatch):
                     f"Request has {len(block_hashes)} hashes but need {num_full_blocks}"
 
                 for i, block in enumerate(new_full_blocks):
-                    if bool(getattr(block, "is_null", False)):
+                    if getattr(block, "is_null", False):
                         continue
 
                     block_idx = num_cached_blocks + i
@@ -394,7 +397,7 @@ class ElasticBlockPoolPatch(VersionAwarePatch, BasePatch):
                     block_ids = [
                         block.block_id
                         for block in ordered_blocks
-                        if block is not None and not bool(getattr(block, "is_null", False))
+                        if block is not None and not getattr(block, "is_null", False)
                     ]
                     if block_ids:
                         self.kv_cache_manager.free(block_ids)
@@ -402,7 +405,7 @@ class ElasticBlockPoolPatch(VersionAwarePatch, BasePatch):
 
                 uncached_to_free: list[int] = []
                 for block in ordered_blocks:
-                    if block is None or bool(getattr(block, "is_null", False)):
+                    if block is None or getattr(block, "is_null", False):
                         continue
                     block.ref_cnt -= 1
                     if block.ref_cnt == 0:
