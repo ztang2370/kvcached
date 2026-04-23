@@ -689,6 +689,97 @@ class ElasticMLAMemoryPoolPatch(VersionAwarePatch, BasePatch):
             return False
 
 
+class ElasticHybridLinearKVPoolPatch(VersionAwarePatch, BasePatch):
+    """Inject ElasticHybridLinearKVPool into SGLang's memory pool module.
+
+    Hybrid linear-attention models (e.g. Qwen3-Next, Nemotron-H, Bamba, LFM2,
+    Jamba) wrap a full-attention ``MHATokenToKVPool`` / ``MLATokenToKVPool``
+    and a separate ``MambaPool`` inside ``HybridLinearKVPool``.  SGLang keeps
+    the two pools in distinct memory — unlike vLLM, there is no shared
+    buffer — so kvcached only needs to manage the full-attention pool.
+
+    The outer ``PagedTokenToKVPoolAllocator`` (already aliased to
+    ``ElasticPagedTokenToKVPoolAllocator``) requires the kvcache object to
+    expose ``kvcached_allocator``.  The inner ``full_kv_pool`` has it (since
+    ``MHATokenToKVPool``/``MLATokenToKVPool`` are aliased to their elastic
+    variants), so we expose a delegating property on the hybrid pool.
+    """
+
+    library = "sglang"
+    target_module = "sglang.srt.mem_cache.memory_pool"
+    patch_name = "elastic_hybrid_linear_memory_pool"
+
+    def apply(self, mem_pool_mod: types.ModuleType) -> bool:
+        if not self.initialize_version_info():
+            return False
+
+        success = self.inject_elastic_hybrid_linear_pool(mem_pool_mod)
+        if success:
+            success &= self.alias_hybrid_linear_pool_to_elastic(mem_pool_mod)
+        return success
+
+    @version_range(SGLANG_ALL_RANGE)
+    def inject_elastic_hybrid_linear_pool(self, mem_pool_mod: types.ModuleType) -> bool:
+        """Inject ElasticHybridLinearKVPool."""
+        if hasattr(mem_pool_mod, "ElasticHybridLinearKVPool"):
+            self.logger.debug("ElasticHybridLinearKVPool already exists")
+            return True
+
+        HybridLinearKVPool = getattr(mem_pool_mod, "HybridLinearKVPool", None)
+        if HybridLinearKVPool is None:
+            # Older SGLang versions don't ship hybrid linear-attention support.
+            self.logger.debug(
+                "HybridLinearKVPool not found in memory_pool module; "
+                "skipping ElasticHybridLinearKVPool injection"
+            )
+            return True
+
+        try:
+            class ElasticHybridLinearKVPool(HybridLinearKVPool):  # type: ignore[misc, valid-type]
+                """Hybrid linear-attention KV pool backed by kvcached for
+                the full-attention layers.
+
+                The inner ``full_kv_pool`` is an elastic MHA/MLA pool (because
+                ``MHATokenToKVPool`` / ``MLATokenToKVPool`` are aliased), so the
+                base ``HybridLinearKVPool.__init__`` already wires kvcached for
+                the attention layers. ``MambaPool`` remains a plain torch tensor
+                allocation, managed independently of kvcached.
+                """
+
+                @property
+                def kvcached_allocator(self):
+                    # Delegate to the attention pool's kvcached allocator so
+                    # the outer ElasticPagedTokenToKVPoolAllocator can reach it
+                    # through kvcache.kvcached_allocator.
+                    return self.full_kv_pool.kvcached_allocator
+
+            setattr(mem_pool_mod, "ElasticHybridLinearKVPool", ElasticHybridLinearKVPool)
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to inject ElasticHybridLinearKVPool: {e}")
+            return False
+
+    @version_range(SGLANG_ALL_RANGE)
+    def alias_hybrid_linear_pool_to_elastic(self, mem_pool_mod: types.ModuleType) -> bool:
+        """Alias HybridLinearKVPool to ElasticHybridLinearKVPool."""
+        if self._is_already_patched(mem_pool_mod, "__kvcached_hybrid_linear_mempool_aliased__"):
+            return True
+
+        ElasticHybridLinearKVPool = getattr(mem_pool_mod, "ElasticHybridLinearKVPool", None)
+        if ElasticHybridLinearKVPool is None:
+            # Injection skipped (older SGLang without HybridLinearKVPool).
+            return True
+
+        try:
+            mem_pool_mod.HybridLinearKVPool = ElasticHybridLinearKVPool  # type: ignore
+            self._mark_as_patched(mem_pool_mod, "__kvcached_hybrid_linear_mempool_aliased__")
+            return True
+        except Exception as e:
+            self.logger.warning(
+                f"Failed to alias HybridLinearKVPool to elastic one: {e}")
+            return False
+
+
 class SchedulerMemoryLeakPatch(VersionAwarePatch, BasePatch):
     """Patch SGLang scheduler to suppress memory leak check when kvcached is enabled"""
 
