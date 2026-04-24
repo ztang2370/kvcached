@@ -22,24 +22,6 @@ SGLANG_ALL_RANGE = ">=0.4.9"  # All supported versions
 logger = get_kvcached_logger()
 
 
-def _disable_mem_info_tracker(manager: Any) -> None:
-    """Neutralize a KVCacheManager's MemInfoTracker so it neither writes to
-    nor reads from the shared memory segment.
-
-    The tracker's IPC segment is keyed by DEFAULT_IPC_NAME (one per process),
-    not by group_id.  When multiple elastic pools coexist with different
-    (num_layers * num_kv_buffers), each pool's tracker reads the total_size
-    written by the last pool to init and may erroneously trigger resize()
-    past its own FTensor's VA reservation.  Pools whose capacity is fixed
-    by model architecture (e.g. mamba) can opt out of tracker participation.
-    """
-    tracker = getattr(manager.page_allocator, "mem_info_tracker", None)
-    if tracker is None:
-        return
-    tracker.check_and_get_resize_target = lambda *a, **kw: None  # type: ignore
-    tracker.update_memory_usage = lambda *a, **kw: None  # type: ignore
-
-
 class ElasticAllocatorPatch(VersionAwarePatch, BasePatch):
     """Inject ElasticTokenToKVPoolAllocator into SGLang's allocator module"""
 
@@ -813,9 +795,8 @@ class ElasticMambaPoolPatch(VersionAwarePatch, BasePatch):
 
                     self.size = size
                     self.device = device
-                    # Prefer the explicit mamba_layer_ids kwarg (sglang
-                    # >=0.5.10); fall back to cache_params.layers for newer
-                    # variants that moved the list there.
+                    # SGLang passes the layer list as either a mamba_layer_ids
+                    # kwarg or cache_params.layers, depending on version.
                     if mamba_layer_ids is not None:
                         layer_ids = list(mamba_layer_ids)
                     else:
@@ -892,22 +873,6 @@ class ElasticMambaPoolPatch(VersionAwarePatch, BasePatch):
                         num_kv_buffers=1,
                         group_id=self._group_id,
                     )
-
-                    # MemInfoTracker is backed by a single shared-memory
-                    # segment per process (DEFAULT_IPC_NAME), so every
-                    # PageAllocator's tracker writes/reads the same bytes.
-                    # When the attention pool initializes with a different
-                    # (num_layers * num_kv_buffers), the mamba tracker would
-                    # read a total_size that doesn't match its FTensor and
-                    # trigger resize() — extending num_total_pages past the
-                    # FTensor's actual VA reservation, causing cuMemUnmap to
-                    # fail with invalid argument.
-                    #
-                    # Mamba capacity is fixed by model architecture and not
-                    # resizable via kvctl, so disable the tracker on this
-                    # pool entirely.  Attention pools keep theirs and remain
-                    # kvctl-controllable.
-                    _disable_mem_info_tracker(self.kvcached_allocator)
 
                     # Placeholder so code that touches self.free_slots in
                     # error paths (e.g. suppressed leak checks) doesn't
