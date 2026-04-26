@@ -194,45 +194,6 @@ def _reshape_mamba_non_contiguous(
     return state_tensors
 
 
-def _reshape_mamba_contiguous(
-    mamba_info: dict, kv_cache_spec: Any, pool_idx: int, get_dtype_size: Any,
-) -> list:
-    """Create strided mamba state views from a contiguous interleaved buffer.
-
-    In contiguous layout, block N for pool L sits at byte offset
-    ``(N * num_pools + L) * page_size_bytes`` inside the single base
-    buffer.  The inter-block stride is therefore
-    ``num_pools * page_size_bytes`` bytes, not ``page_size_bytes``.
-    """
-    import torch
-
-    base_buffer = mamba_info["buffers"][0]  # flat int8 buffer
-    num_blocks = mamba_info["num_blocks"]
-    page_size_bytes = mamba_info["page_size_bytes"]
-    block_stride_bytes = mamba_info["block_stride_bytes"]
-
-    layer_offset_bytes = pool_idx * page_size_bytes
-
-    state_tensors: list = []
-    inner_offset_bytes = 0
-    for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
-        dtype_size = get_dtype_size(dtype)
-        block_stride_elems = block_stride_bytes // dtype_size
-        target_shape = (num_blocks, *shape)
-        inner_stride = torch.empty(target_shape).stride()
-        target_stride = (block_stride_elems, *inner_stride[1:])
-        storage_offset = (layer_offset_bytes + inner_offset_bytes) // dtype_size
-        tensor = torch.as_strided(
-            base_buffer.view(dtype),
-            size=target_shape,
-            stride=target_stride,
-            storage_offset=storage_offset,
-        )
-        state_tensors.append(tensor)
-        inner_offset_bytes += inner_stride[0] * dtype_size
-    return state_tensors
-
-
 # Version ranges for vLLM support
 VLLM_V8_RANGE = ">=0.8.4,<0.9.0"  # vLLM 0.8.x versions, need to cover 0.8.5.post1
 VLLM_V9_PLUS_RANGE = ">=0.9.0"  # vLLM 0.9.x and 0.9+.x versions
@@ -1263,15 +1224,10 @@ class GPUModelRunnerPatch(VersionAwarePatch, BasePatch):
                             "available from kvcached"
                         )
                     for pool_idx, layer_name in enumerate(kv_cache_group.layer_names):
-                        if mamba_info["is_contiguous"]:
-                            state_tensors = _reshape_mamba_contiguous(
-                                mamba_info, kv_cache_spec, pool_idx, get_dtype_size,
-                            )
-                        else:
-                            state_tensors = _reshape_mamba_non_contiguous(
-                                mamba_info["buffers"][pool_idx],
-                                kv_cache_spec, get_dtype_size,
-                            )
+                        state_tensors = _reshape_mamba_non_contiguous(
+                            mamba_info["buffers"][pool_idx],
+                            kv_cache_spec, get_dtype_size,
+                        )
                         kv_caches[layer_name] = state_tensors  # type: ignore[assignment]
                 else:
                     for pool_idx, layer_name in enumerate(kv_cache_group.layer_names):
