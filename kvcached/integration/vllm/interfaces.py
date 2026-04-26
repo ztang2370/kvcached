@@ -115,14 +115,12 @@ def alloc_kv_cache(
         List[torch.Tensor] for MHA/GQA/MLA.
         For HYBRID_LINEAR, returns (kv_tensors, raw_info) where
         raw_info is a dict with:
-          buffers            - flat int8 tensors (one per pool when
-                               non-contiguous, single base when contiguous)
+          buffers            - flat int8 tensors, one per pool
           num_blocks         - number of blocks per pool
           page_size_bytes    - uniform page size (bytes) shared by all groups
           block_stride_bytes - byte stride between consecutive blocks of the
                                same pool
           num_pools          - number of pools (== num_layers)
-          is_contiguous      - whether contiguous layout is used
     """
     if not _kvcached_initialized:
         raise RuntimeError("kvcached is not initialized. Please call init_kvcached() first.")
@@ -282,10 +280,6 @@ def alloc_kv_cache(
                 kv_tensors.append(
                     torch.as_strided(t.view(dtype=dtype), shape, strides))
     else:
-        if ratio > 1:
-            raise NotImplementedError(
-                "Contiguous layout with kernel_block_size != block_size "
-                "is not supported yet.")
         layer_elem_shape = actual_kvcache_shape[:blocks_dim_idx] + actual_kvcache_shape[blocks_dim_idx + 1:]
         contiguous_shape = [num_blocks_per_layer, num_layers] + layer_elem_shape
         num_eles = math.prod(contiguous_shape)
@@ -298,21 +292,15 @@ def alloc_kv_cache(
         return kv_tensors
 
     # --- Build raw int8 buffers for hybrid model (mamba) support ---
-    if not _contiguous_layout:
-        pool_bytes = num_blocks_per_layer * page_size_bytes
-        raw_int8 = [t.view(torch.int8)[:pool_bytes] for t in raw_kv_tensors]
-        block_stride_bytes = page_size_bytes
-    else:
-        raw_int8 = [raw_kv_tensors[0].view(torch.int8)]
-        block_stride_bytes = num_layers * page_size_bytes
+    pool_bytes = num_blocks_per_layer * page_size_bytes
+    raw_int8 = [t.view(torch.int8)[:pool_bytes] for t in raw_kv_tensors]
 
     raw_info = {
         "buffers": raw_int8,
         "num_blocks": num_blocks_per_layer,
         "page_size_bytes": page_size_bytes,
-        "block_stride_bytes": block_stride_bytes,
+        "block_stride_bytes": page_size_bytes,
         "num_pools": num_layers,
-        "is_contiguous": _contiguous_layout,
     }
     return kv_tensors, raw_info  # type: ignore[return-value]
 
