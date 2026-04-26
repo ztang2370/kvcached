@@ -202,8 +202,9 @@ class PageAllocator:
         self.reclaimed_page_list: deque[int] = deque()  # Reclaimed page ids
 
         # Initialize memory info tracker
-        self.mem_info_tracker = MemInfoTracker(self.mem_size_per_layer *
-                                               num_layers * num_kv_buffers)
+        self.mem_info_tracker = MemInfoTracker(
+            self.mem_size_per_layer * num_layers * num_kv_buffers,
+            group_id=group_id)
 
         # Preallocation thread management
         self.enable_page_prealloc: bool = enable_page_prealloc

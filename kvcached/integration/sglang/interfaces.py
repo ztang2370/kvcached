@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import math
-from typing import List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 
@@ -164,6 +164,162 @@ def alloc_kv_cache(
             v_tensors.append(contiguous_tensor[:, i, 1, :, :])
 
     return k_tensors, v_tensors
+
+
+def alloc_mamba_states(
+    *,
+    num_slots: int,
+    num_mamba_layers: int,
+    cache_params: Any,
+    device: str,
+    group_id: int = 0,
+) -> Tuple[List[torch.Tensor], torch.Tensor, Dict[str, Any]]:
+    """Allocate kvcached-backed mamba conv + temporal state tensors with a
+    super-cell layout.
+
+    Requires contiguous kvcached layout so all mamba layers live in a single
+    VM reservation, which lets us hand back ``(num_mamba_layers, num_slots,
+    *shape)`` tensors identical in shape to the native ``MambaPool`` buffers.
+
+    Per-slot byte layout within each (slot, layer) super-cell:
+
+        [ conv[0] bytes | conv[1] bytes | ... | temporal bytes ]
+
+    One mamba slot == one kvcached block; a single ``map_to_kv_tensors`` call
+    backs every state kind for that slot across all layers simultaneously.
+
+    Returns:
+        (conv_state_list, temporal_state, layout_info)
+    """
+    if not _kvcached_initialized:
+        raise RuntimeError(
+            "kvcached is not initialized. Please call init_kvcached() first.")
+
+    if not _contiguous_layout:
+        raise RuntimeError(
+            "ElasticMambaPool requires contiguous kvcached layout. "
+            "Set KVCACHED_CONTIGUOUS_LAYOUT=true before starting the server.")
+
+    assert torch.cuda.is_available(), "CUDA is not available."
+
+    conv_shapes = [tuple(s) for s in cache_params.shape.conv]
+    temporal_shape = tuple(cache_params.shape.temporal)
+    conv_dtype = cache_params.dtype.conv
+    ssm_dtype = cache_params.dtype.temporal
+
+    def _align_up(x: int, a: int) -> int:
+        return (x + a - 1) // a * a
+
+    # Pack state kinds end-to-end per slot; track per-kind byte offsets.
+    conv_offsets: List[int] = []
+    offset = 0
+    for shape in conv_shapes:
+        offset = _align_up(offset, conv_dtype.itemsize)
+        conv_offsets.append(offset)
+        offset += int(math.prod(shape)) * conv_dtype.itemsize
+    offset = _align_up(offset, ssm_dtype.itemsize)
+    temporal_offset = offset
+    offset += int(math.prod(temporal_shape)) * ssm_dtype.itemsize
+
+    max_align = max(conv_dtype.itemsize, ssm_dtype.itemsize)
+    raw_cell_size = _align_up(offset, max_align)
+
+    if raw_cell_size > PAGE_SIZE:
+        raise RuntimeError(
+            f"Mamba per-slot super-cell ({raw_cell_size} bytes) exceeds "
+            f"kvcached PAGE_SIZE ({PAGE_SIZE} bytes). Raise "
+            "KVCACHED_PAGE_SIZE_MB so a single physical page can back at "
+            "least one slot.")
+
+    # Pad cell_size up to a divisor of PAGE_SIZE so blocks_per_page is an
+    # integer with no straddle-skipping.  Reason: kvcached's PageAllocator
+    # delivers floor(page_size / block_mem_size) blocks per page when
+    # block_mem_size does not divide page_size evenly (straddling block IDs
+    # are dropped by Page.get_block_range).  Passing num_blocks=num_slots to
+    # KVCacheManager over-promises capacity — the manager then tracks
+    # mem_size = num_slots * raw_cell_size per layer but PageAllocator can
+    # only supply floor(mem_size / page_size) blocks, which falls short of
+    # num_slots.  The scheduler then hits "Not enough space for mamba
+    # cache" long before the real pool is full.
+    #
+    # Padding to the smallest divisor of PAGE_SIZE >= raw_cell_size makes
+    # blocks_per_page a clean integer; num_slots blocks are actually
+    # deliverable.  Raising KVCACHED_PAGE_SIZE_MB exposes finer divisors
+    # (e.g. 6 MB has a 1.5 MB divisor) and reduces the virtual overhead.
+    def _smallest_divisor_ge(n: int, lower: int) -> int:
+        best = n
+        i = 1
+        while i * i <= n:
+            if n % i == 0:
+                if i >= lower:
+                    best = min(best, i)
+                j = n // i
+                if j >= lower:
+                    best = min(best, j)
+            i += 1
+        return best
+
+    cell_size = _smallest_divisor_ge(PAGE_SIZE, raw_cell_size)
+    if cell_size != raw_cell_size:
+        overhead = (cell_size - raw_cell_size) * num_mamba_layers * num_slots
+        logger.info(
+            f"[kvcached] Elastic mamba cell padded: "
+            f"raw={raw_cell_size}B -> {cell_size}B "
+            f"(divisor of PAGE_SIZE={PAGE_SIZE}B). Virtual overhead: "
+            f"{overhead / (1024**3):.2f} GB. Raise KVCACHED_PAGE_SIZE_MB "
+            "for finer divisors if needed.")
+
+    # create_kv_tensors expects per-layer size aligned to PAGE_SIZE.
+    per_layer_bytes = num_slots * cell_size
+    per_layer_bytes_aligned = _align_up(per_layer_bytes, PAGE_SIZE)
+
+    raw_tensors = create_kv_tensors(
+        per_layer_bytes_aligned, torch.int8.itemsize, device,
+        num_mamba_layers, num_kv_buffers=1, group_id=group_id,
+    )
+    # Contiguous layout hands back a single flat int8 FTensor covering all
+    # mamba layers: bytes laid out as [slot][layer][cell].
+    flat_int8 = raw_tensors[0]
+
+    def _view_state(shape: Tuple[int, ...], dtype: torch.dtype,
+                    offset_bytes: int) -> torch.Tensor:
+        dtype_size = dtype.itemsize
+        assert offset_bytes % dtype_size == 0
+        assert cell_size % dtype_size == 0
+
+        inner_stride: List[int] = []
+        running = 1
+        for d in reversed(shape):
+            inner_stride.insert(0, running)
+            running *= d
+
+        size = (num_mamba_layers, num_slots, *shape)
+        strides = [
+            cell_size // dtype_size,
+            (num_mamba_layers * cell_size) // dtype_size,
+            *inner_stride,
+        ]
+        return torch.as_strided(
+            flat_int8.view(dtype=dtype),
+            size=size,
+            stride=strides,
+            storage_offset=offset_bytes // dtype_size,
+        )
+
+    conv_state = [
+        _view_state(shape, conv_dtype, conv_offsets[i])
+        for i, shape in enumerate(conv_shapes)
+    ]
+    temporal_state = _view_state(temporal_shape, ssm_dtype, temporal_offset)
+
+    layout_info: Dict[str, Any] = {
+        "cell_size": cell_size,
+        "num_slots": num_slots,
+        "num_mamba_layers": num_mamba_layers,
+        "conv_offsets": conv_offsets,
+        "temporal_offset": temporal_offset,
+    }
+    return conv_state, temporal_state, layout_info
 
 
 def get_kv_cache_manager(
