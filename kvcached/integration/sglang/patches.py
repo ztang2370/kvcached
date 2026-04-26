@@ -992,11 +992,16 @@ class ElasticHybridLinearKVPoolPatch(VersionAwarePatch, BasePatch):
                 """Hybrid linear-attention KV pool backed by kvcached for
                 the full-attention layers.
 
-                The inner ``full_kv_pool`` is an elastic MHA/MLA pool (because
-                ``MHATokenToKVPool`` / ``MLATokenToKVPool`` are aliased), so the
-                base ``HybridLinearKVPool.__init__`` already wires kvcached for
-                the attention layers. ``MambaPool`` remains a plain torch tensor
-                allocation, managed independently of kvcached. #FIXME
+                Both sub-pools are kvcached-backed via class aliasing done
+                earlier in this patch module: ``MHATokenToKVPool`` /
+                ``MLATokenToKVPool`` are aliased to their elastic variants, so
+                the inner ``full_kv_pool`` constructed by
+                ``HybridLinearKVPool.__init__`` is an elastic attention pool;
+                ``MambaPool`` is aliased to ``ElasticMambaPool`` (see
+                ``ElasticMambaPoolPatch``), so the inner mamba pool allocates
+                conv + temporal state through kvcached as well. Each sub-pool
+                gets its own ``group_id`` so their IPC mem-info segments don't
+                collide.
                 """
 
                 @property
