@@ -1028,48 +1028,50 @@ class ElasticMambaPoolPatch(VersionAwarePatch, BasePatch):
                     self, src_index: "torch.Tensor", dst_index: "torch.Tensor"
                 ) -> None:
                     if self._is_contiguous:
-                        return super().copy_from(src_index, dst_index)
-                    for shape_list in self.mamba_cache.conv_per_layer:
-                        for t in shape_list:
+                        if hasattr(MambaPool, "copy_from"):
+                            super().copy_from(src_index, dst_index)
+                    else:
+                        for shape_list in self.mamba_cache.conv_per_layer:
+                            for t in shape_list:
+                                t[dst_index] = t[src_index]
+                        for t in self.mamba_cache.temporal_per_layer:
                             t[dst_index] = t[src_index]
-                    for t in self.mamba_cache.temporal_per_layer:
-                        t[dst_index] = t[src_index]
 
                 def get_contiguous_buf_infos(self):
                     if self._is_contiguous:
-                        return super().get_contiguous_buf_infos()
-                    # Non-contiguous: emit per-layer pointer/length triples
-                    # in the same order RDMA registration expects:
-                    # (state_kind_outer, layer_inner).
-                    data_ptrs: List[int] = []
-                    data_lens: List[int] = []
-                    item_lens: List[int] = []
-                    state_lists: List[List["torch.Tensor"]] = list(
-                        self.mamba_cache.conv_per_layer
-                    ) + [list(self.mamba_cache.temporal_per_layer)]
-                    for state_list in state_lists:
-                        for layer_t in state_list:
-                            data_ptrs.append(layer_t.data_ptr())
-                            data_lens.append(layer_t.nbytes)
-                            item_lens.append(layer_t[0].nbytes)
-                    return data_ptrs, data_lens, item_lens
+                        if hasattr(MambaPool, "get_contiguous_buf_infos"):
+                            return super().get_contiguous_buf_infos()
+                    else:
+                        # Non-contiguous: per-layer pointer/length triples
+                        # in (state_kind_outer, layer_inner) order.
+                        data_ptrs: List[int] = []
+                        data_lens: List[int] = []
+                        item_lens: List[int] = []
+                        state_lists: List[List["torch.Tensor"]] = list(
+                            self.mamba_cache.conv_per_layer
+                        ) + [list(self.mamba_cache.temporal_per_layer)]
+                        for state_list in state_lists:
+                            for layer_t in state_list:
+                                data_ptrs.append(layer_t.data_ptr())
+                                data_lens.append(layer_t.nbytes)
+                                item_lens.append(layer_t[0].nbytes)
+                        return data_ptrs, data_lens, item_lens
 
                 def get_state_dim_per_tensor(self):
                     if self._is_contiguous:
-                        return super().get_state_dim_per_tensor()
-                    # Per-layer state shape is (slots, sliceable_dim, ...);
-                    # the sliceable dimension is at index 1 (post-slot).
-                    dim_per_tensor: List[int] = []
-                    state_lists: List[List["torch.Tensor"]] = list(
-                        self.mamba_cache.conv_per_layer
-                    ) + [list(self.mamba_cache.temporal_per_layer)]
-                    for state_list in state_lists:
-                        # All layers share the same shape; pick layer 0 for
-                        # the dim, then repeat across layers — same
-                        # convention as the contiguous path.
-                        sliceable_dim = state_list[0].shape[1]
-                        dim_per_tensor += [sliceable_dim] * self.num_mamba_layers
-                    return dim_per_tensor
+                        if hasattr(MambaPool, "get_state_dim_per_tensor"):
+                            return super().get_state_dim_per_tensor()
+                    else:
+                        # Per-layer state shape is (slots, sliceable_dim, ...);
+                        # the sliceable dimension is at index 1 (post-slot).
+                        dim_per_tensor: List[int] = []
+                        state_lists: List[List["torch.Tensor"]] = list(
+                            self.mamba_cache.conv_per_layer
+                        ) + [list(self.mamba_cache.temporal_per_layer)]
+                        for state_list in state_lists:
+                            sliceable_dim = state_list[0].shape[1]
+                            dim_per_tensor += [sliceable_dim] * self.num_mamba_layers
+                        return dim_per_tensor
 
             setattr(mem_pool_mod, "ElasticMambaPool", ElasticMambaPool)
             return True
