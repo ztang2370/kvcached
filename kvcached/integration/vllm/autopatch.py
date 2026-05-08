@@ -24,7 +24,10 @@ logger = get_kvcached_logger()
 
 
 def _env_enabled() -> bool:
-    return os.getenv("KVCACHED_AUTOPATCH", "false").lower() in ("true", "1")
+    autopatch = os.getenv("KVCACHED_AUTOPATCH")
+    if autopatch is not None:
+        return autopatch.lower() in ("true", "1")
+    return os.getenv("ENABLE_KVCACHED", "false").lower() in ("true", "1")
 
 
 @when_imported("vllm")
