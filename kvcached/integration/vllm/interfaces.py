@@ -207,6 +207,17 @@ def alloc_kv_cache(
             f"Requested {requested_num_blocks} blocks, but only {num_blocks_per_layer} blocks are available."
         )
 
+    logger.info(
+        f"[kvcached-debug] attention_type={attention_type} unified_pool={unified_pool} "
+        f"block_mem_bytes={block_mem_bytes} "
+        f"PAGE_SIZE={PAGE_SIZE} "
+        f"block_mem_bytes>PAGE_SIZE={block_mem_bytes > PAGE_SIZE} "
+        f"PAGE_SIZE%block_mem_bytes={PAGE_SIZE % block_mem_bytes if block_mem_bytes <= PAGE_SIZE else 'N/A'} "
+        f"divisible={(block_mem_bytes <= PAGE_SIZE) and (PAGE_SIZE % block_mem_bytes == 0)} "
+        f"num_blocks_per_layer={num_blocks_per_layer} "
+        f"kvcache_shape={kvcache_shape} block_size={block_size} num_layers={num_layers}"
+    )
+
     ftensor_bytes_per_layer = gpu_mem_bytes_per_layer_k_or_v * num_k_or_v
 
     raw_kv_tensors = create_kv_tensors(
