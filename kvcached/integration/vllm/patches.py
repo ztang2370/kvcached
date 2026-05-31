@@ -255,6 +255,24 @@ def _get_max_cached_blocks(block_size: int) -> int:
         return -1
     return MAX_CACHED_TOKENS // block_size
 
+
+def _make_cache_key(block_hash: Any, group_id: int) -> bytes:
+    """Pack block_hash + group_id into a composite cache key.
+
+    Mirrors vLLM's make_block_hash_with_group_id: appends a 4-byte big-endian
+    group_id so the same content hash is distinct across KV cache groups
+    (e.g. full attention vs sliding window). ``block_hash`` may arrive as
+    ``bytes`` (the common case) or ``str`` (some vLLM versions pass a hex
+    digest); a str is encoded to bytes so both inputs produce identical keys.
+
+    Module-level (rather than a nested staticmethod) so it is unit-testable
+    without applying the vLLM patch or holding a GPU.
+    """
+    if isinstance(block_hash, str):
+        block_hash = block_hash.encode()
+    return bytes(block_hash) + group_id.to_bytes(4, "big", signed=False)
+
+
 class ElasticBlockPoolPatch(VersionAwarePatch, BasePatch):
     """Inject ElasticBlockPool into vLLM's block pool module"""
 
@@ -343,16 +361,6 @@ class ElasticBlockPoolPatch(VersionAwarePatch, BasePatch):
                 # cross-request prefix reuse. Insertion order = LRU order.
                 self._evictable_blocks: OrderedDict[int, KVCacheBlock] = OrderedDict()
 
-            @staticmethod
-            def _make_cache_key(block_hash: Any, group_id: int) -> bytes:
-                """Pack block_hash + group_id into a composite cache key.
-
-                Mirrors vLLM's make_block_hash_with_group_id: appends 4-byte
-                big-endian group_id so the same content hash is distinct across
-                KV cache groups (e.g. full attention vs sliding window).
-                """
-                return bytes(block_hash) + group_id.to_bytes(4, "big", signed=False)
-
             def get_cached_block(
                 self,
                 block_hash: Any,
@@ -367,14 +375,14 @@ class ElasticBlockPoolPatch(VersionAwarePatch, BasePatch):
                 # - Newer hybrid-attention paths pass multiple group ids and
                 #   expect one block per group.
                 if kv_cache_group_ids is None:
-                    key = self._make_cache_key(block_hash, 0)
+                    key = _make_cache_key(block_hash, 0)
                     return self._cached_blocks.get(key)
                 if isinstance(kv_cache_group_ids, int):
                     kv_cache_group_ids = [int(kv_cache_group_ids)]
 
                 cached_blocks: list[KVCacheBlock] = []
                 for group_id in kv_cache_group_ids:
-                    key = self._make_cache_key(block_hash, int(group_id))
+                    key = _make_cache_key(block_hash, int(group_id))
                     block = self._cached_blocks.get(key)
                     if block is None:
                         # Atomic: all groups must hit or return None
@@ -446,7 +454,7 @@ class ElasticBlockPoolPatch(VersionAwarePatch, BasePatch):
 
                     block_idx = num_cached_blocks + i
                     block_hash = block_hashes[block_idx]
-                    key = self._make_cache_key(block_hash, kv_cache_group_id)
+                    key = _make_cache_key(block_hash, kv_cache_group_id)
 
                     # Already cached, idempotent
                     if key in self._cached_blocks:
