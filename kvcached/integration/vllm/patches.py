@@ -486,14 +486,27 @@ class ElasticBlockPoolPatch(VersionAwarePatch, BasePatch):
                     raise ValueError(
                         f"Cannot get {num_blocks} free blocks from the pool")
 
-                if self.enable_prefix_cache:
-                    # Evict cached blocks if kvcached doesn't have enough free space
-                    kvcached_free = self.kv_cache_manager.available_size()
-                    if kvcached_free < num_blocks and self._evictable_blocks:
-                        self._evict_blocks_from_pool(num_blocks - kvcached_free)
+                block_ids: Optional[list[int]] = None
+                for _ in range(2):
+                    if self.enable_prefix_cache:
+                        kvcached_free = self.kv_cache_manager.available_size()
+                        if kvcached_free < num_blocks and self._evictable_blocks:
+                            self._evict_blocks_from_pool(num_blocks - kvcached_free)
+                    block_ids = self.kv_cache_manager.alloc(num_blocks)
+                    if block_ids is not None:
+                        break
 
-                block_ids = self.kv_cache_manager.alloc(num_blocks)
-                assert block_ids is not None and len(block_ids) == num_blocks
+                if block_ids is None:
+                    raise ValueError(
+                        "Unable to allocate KV cache blocks from physical pool; "
+                        f"requested={num_blocks}, available={self.kv_cache_manager.available_size()}"
+                    )
+
+                # alloc() returns either None or exactly num_blocks ids
+                # (see KVCacheManager._alloc), so a different length is a
+                # contract violation rather than a recoverable runtime state.
+                assert len(block_ids) == num_blocks, (
+                    f"alloc returned {len(block_ids)} blocks, expected {num_blocks}")
 
                 blocks = []
                 for bid in block_ids:
