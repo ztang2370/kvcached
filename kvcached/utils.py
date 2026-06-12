@@ -139,8 +139,30 @@ SANITY_CHECK = os.getenv("KVCACHED_SANITY_CHECK", "false").lower() == "true"
 # Used by both SGLang (RadixCacheLimitPatch) and vLLM (ElasticBlockPool),
 # which converts to blocks internally via MAX_CACHED_TOKENS // block_size.
 MAX_CACHED_TOKENS = int(os.getenv("KVCACHED_MAX_CACHED_TOKENS", "16000"))
-CONTIGUOUS_LAYOUT = os.getenv("KVCACHED_CONTIGUOUS_LAYOUT",
-                              "true").lower() == "true"
+
+
+def _default_contiguous_layout() -> bool:
+    """Default KV-cache layout: contiguous on CUDA, non-contiguous on HIP/ROCm.
+
+    An explicit ``KVCACHED_CONTIGUOUS_LAYOUT`` always wins. Otherwise we pick
+    non-contiguous on ROCm: the contiguous (compound-page) layout hands the
+    attention backend strided/interleaved per-layer KV tensors, which vLLM's
+    ROCm attention path (``split_kv_cache`` + paged kernels) reads incorrectly,
+    whereas CUDA's FlashAttention/FlashInfer tolerate it.
+    """
+    explicit = os.getenv("KVCACHED_CONTIGUOUS_LAYOUT")
+    if explicit is not None:
+        return explicit.lower() == "true"
+    try:
+        import torch
+        if getattr(torch.version, "hip", None):
+            return False  # ROCm/HIP: non-contiguous is required for correctness
+    except Exception:
+        pass
+    return True
+
+
+CONTIGUOUS_LAYOUT = _default_contiguous_layout()
 
 DEFAULT_IPC_NAME = _obtain_default_ipc_name()
 SHM_DIR = "/dev/shm"
@@ -156,6 +178,19 @@ _LEVEL_TO_COLOR = {
     logging.CRITICAL: "\033[35m",  # Magenta
 }
 _COLOR_RESET = "\033[0m"
+
+
+def normalize_gpu_device(device: str) -> str:
+    """Map a ``hip[:N]`` device string to ``cuda[:N]``.
+
+    PyTorch-ROCm and the C++ extension (``c10::Device``) address AMD GPUs as
+    ``cuda``; kvcached's integration accepts ``hip`` strings, so normalize them
+    before handing the device to any ``torch.cuda`` API or ``create_kv_tensors``.
+    """
+    dev = str(device)
+    if dev.lower().startswith("hip"):
+        return "cuda" + dev[3:]
+    return dev
 
 
 def align_to(x: int, a: int) -> int:
