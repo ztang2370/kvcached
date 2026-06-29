@@ -6,6 +6,12 @@ import logging
 import os
 
 
+class KVCachedConfigError(RuntimeError):
+    """Raised for kvcached misconfiguration the user must fix (e.g. a KV block
+    larger than the page size). Integration patches re-raise this loudly to
+    abort startup instead of silently falling back to non-kvcached behavior."""
+
+
 def _sanitize_segment(segment: str) -> str:
     """Sanitize a segment to safe characters for SHM names."""
     allowed = []

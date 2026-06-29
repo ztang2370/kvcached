@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Iterable, Optional
 
 from kvcached.integration.patch_base import BasePatch, enable_kvcached
 from kvcached.integration.version_utils import VersionAwarePatch, VersionRange, version_range
+from kvcached.utils import KVCachedConfigError
 
 if TYPE_CHECKING:
     # These types are imported from vLLM at runtime via getattr()
@@ -708,8 +709,13 @@ class KVCacheCoordinatorPatch(VersionAwarePatch, BasePatch):
 
             try:
                 self._setup_kvcached_coordinator()
-            except Exception:
-                logger.warning("Failed to patch kv_cache_coordinator")
+            except KVCachedConfigError:
+                # User-fixable misconfiguration (e.g. KV block larger than the
+                # page size). Abort loudly instead of silently disabling
+                # kvcached and falling back to vanilla allocation.
+                raise
+            except Exception as e:
+                logger.warning("Failed to patch kv_cache_coordinator: %s", e)
                 return
 
         def _setup_kvcached_coordinator(self) -> None:
