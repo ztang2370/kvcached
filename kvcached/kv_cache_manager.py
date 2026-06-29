@@ -106,7 +106,7 @@ class KVCacheManager:
             min_page_mb = ((self.block_mem_size + base - 1) // base) * 2
             raise KVCachedConfigError(
                 f"kvcached KV block size ({self.block_mem_size} bytes, "
-                f"{self.block_mem_size / base * 2:.2f} MiB) is larger than the "
+                f"{self.block_mem_size / (1024 * 1024):.2f} MiB) is larger than the "
                 f"page size ({self.page_size} bytes, "
                 f"{self.page_size // (1024 * 1024)} MiB), so no block fits in a "
                 f"page and the KV pool would be empty. This typically happens "
